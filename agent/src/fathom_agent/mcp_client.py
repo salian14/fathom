@@ -25,6 +25,7 @@ from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
 
+from . import telemetry
 from .config import Config
 
 TRUNCATION_NOTE = "[truncated: showing the last {kept} of {total} characters]\n"
@@ -49,10 +50,19 @@ async def tool_session(cfg: Config, client: MultiServerMCPClient) -> AsyncIterat
     The tool *schemas* come from the server's tools/list rather than being restated
     here -- that is what keeps this agent in lockstep with the Go tool definitions.
     Adding a tool there needs no change here.
+
+    The span around the session is not decoration. The MCP client issues its
+    request POSTs from a background anyio task, and anyio snapshots contextvars
+    when that task is spawned -- which is when the session opens. So this is the
+    span whose id ends up in the traceparent header that fathom-mcp reads, and
+    naming it well is what keeps the server's spans attached to something
+    meaningful rather than to whatever happened to be current.
     """
-    async with client.session("fathom") as session:
-        tools = await load_mcp_tools(session)
-        yield [_bounded(tool, cfg.max_tool_chars) for tool in tools]
+    with telemetry.tracer().start_as_current_span("mcp.session") as span:
+        async with client.session("fathom") as session:
+            tools = await load_mcp_tools(session)
+            span.set_attribute("mcp.tool.count", len(tools))
+            yield [_bounded(tool, cfg.max_tool_chars) for tool in tools]
 
 
 def truncate(text: str, limit: int) -> str:
@@ -94,14 +104,38 @@ def _bounded(tool: BaseTool, limit: int) -> BaseTool:
 
     @functools.wraps(inner)
     async def bounded(*args, **kwargs):
-        result = await inner(*args, **kwargs)
-        if isinstance(result, tuple) and len(result) == 2:
-            content, artifact = result
-            return _truncate_content(content, limit), artifact
-        return _truncate_content(result, limit)
+        # A sibling of the wire span, not its ancestor -- see tool_session on
+        # why the HTTP call is parented to the session instead. Worth having
+        # anyway: this is the only place that knows the tool's name alongside
+        # how much of its result the model actually got to see.
+        with telemetry.tracer().start_as_current_span(f"mcp.tool {tool.name}") as span:
+            span.set_attribute("mcp.tool.name", tool.name)
+            result = await inner(*args, **kwargs)
+
+            if isinstance(result, tuple) and len(result) == 2:
+                content, artifact = result
+                bounded_content = _truncate_content(content, limit)
+                _record_size(span, content, bounded_content)
+                return bounded_content, artifact
+
+            bounded_content = _truncate_content(result, limit)
+            _record_size(span, result, bounded_content)
+            return bounded_content
 
     tool.coroutine = bounded
     return tool
+
+
+def _record_size(span, original, bounded) -> None:
+    """Note how much of a tool result survived the agent-side cap.
+
+    Truncation is invisible in the answer but often explains it: a model that
+    keeps re-querying the same object is usually reacting to a result that was
+    cut off before the part it needed.
+    """
+    before, after = len(str(original)), len(str(bounded))
+    span.set_attribute("fathom.tool.result_chars", after)
+    span.set_attribute("fathom.tool.truncated", after < before)
 
 
 def _truncate_content(content, limit: int):

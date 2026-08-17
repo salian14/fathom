@@ -1,23 +1,33 @@
 {{- if .Values.ollama.service.create }}
 {{/*
-The one piece of this chart that is not a copy of the MCP chart's shape.
+OFF BY DEFAULT (ollama.service.create=false). The agent dials ollama.url, which
+carries the host's IP directly. This template is kept, unrendered, because the idea
+is sound and only fails for a reason specific to this cluster -- documented below so
+it is not rediscovered from scratch.
 
 Ollama runs on the host, outside the cluster, so there is no Deployment to select
 and no Endpoints to populate from one. ExternalName makes the host reachable under
 a normal in-cluster DNS name: a pod resolving fathom-ollama.fathom.svc.cluster.local
-gets a CNAME to ollama.service.externalName, which CoreDNS resolves through its
-upstream forwarder.
+gets a CNAME to ollama.service.externalName, which CoreDNS then has to resolve
+through its upstream forwarder.
 
-That upstream is the node's resolver, which on this lab is libvirt's dnsmasq -- and
-dnsmasq serves the host's /etc/hosts. So a name in /etc/hosts on the host reaches
-pods, which is the whole reason this works with a machine that has no real DNS
-record.
+That last step is what does not work here, and an earlier version of this comment got
+it wrong. It claimed CoreDNS's upstream is libvirt's dnsmasq, so a host /etc/hosts
+entry alone would reach pods. It does not. CoreDNS forwards to the node's
+/run/systemd/resolve/resolv.conf, which points at a public resolver, so .lab comes
+back NXDOMAIN. registry.lab looks like a counter-example but is not: it lives in each
+VM's own /etc/hosts and is resolved by kubelet, and CoreDNS never reads a node's hosts
+file. A pod then gets a CNAME with no A record behind it, surfacing as EAI_NONAME
+("Name or service not known").
+
+Making it resolve would mean adding a .lab stub zone to the coredns ConfigMap. That
+was considered and rejected: it is a hand-edit to shared kube-system state that a
+cluster rebuild silently drops, in exchange for indirection this component does not
+need. Rather than half-own the cluster's DNS, the address stays where it was already
+declared -- ollama/config.env -- and travels into ollama.url.
 
 No spec.ports: ExternalName ignores them. The port travels in ollama.url instead,
 which is also where a scheme change would go.
-
-If the name does not resolve from inside the cluster, set ollama.service.create to
-false and point ollama.url straight at the host's address on the node network.
 */}}
 apiVersion: v1
 kind: Service

@@ -95,6 +95,17 @@ class Config:
     log_level: int
     system_prompt: str
 
+    # Where traces and metrics go: "otlp" to the collector named by
+    # OTEL_EXPORTER_OTLP_ENDPOINT, "console" to stderr, or "off".
+    #
+    # The only telemetry setting with a FATHOM_AGENT_ prefix. Endpoint,
+    # sampler, resource attributes and export interval all use the standard
+    # OTEL_* variables, which the SDK reads itself -- mirroring them here would
+    # duplicate its validation and give every knob two spellings. This one
+    # earns its place because it decides which exporter is built, and because
+    # "console" is what makes `make run-local` work without a collector.
+    telemetry: str
+
     @property
     def host(self) -> str:
         host, _, _ = self.addr.rpartition(":")
@@ -120,6 +131,7 @@ def load() -> Config:
         ready_cache=_env_duration("READY_CACHE", 30.0),
         log_level=_env_level("LOG_LEVEL", logging.INFO),
         system_prompt=_env("SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT),
+        telemetry=_env("TELEMETRY", "otlp"),
     )
     _validate(cfg)
     return cfg
@@ -155,6 +167,11 @@ def _validate(c: Config) -> None:
 
     if not c.system_prompt.strip():
         raise ValueError(f"{ENV_PREFIX}SYSTEM_PROMPT must not be empty")
+
+    if c.telemetry not in ("otlp", "console", "off"):
+        raise ValueError(
+            f'{ENV_PREFIX}TELEMETRY: want "otlp", "console" or "off", got {c.telemetry!r}'
+        )
 
 
 _ADDR_RE = re.compile(r"^[^:]*:\d+$")

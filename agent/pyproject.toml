@@ -12,6 +12,19 @@ dependencies = [
     "langchain-ollama==1.1.0",
     "langchain-mcp-adapters==0.3.2",
     "httpx==0.28.1",
+    # Telemetry. The gRPC exporter is installed directly rather than through the
+    # opentelemetry-exporter-otlp meta-package, which would also drag in the HTTP
+    # exporter and requests for no benefit.
+    #
+    # Core (1.x) and contrib (0.x) version lines advance together: keep them in
+    # step when bumping, or the instrumentations will not find the API they pin.
+    "opentelemetry-sdk==1.44.0",
+    "opentelemetry-exporter-otlp-proto-grpc==1.44.0",
+    "opentelemetry-instrumentation-fastapi==0.65b0",
+    "opentelemetry-instrumentation-httpx==0.65b0",
+    "opentelemetry-instrumentation-logging==0.65b0",
+    "opentelemetry-instrumentation-system-metrics==0.65b0",
+    "openinference-instrumentation-langchain==0.1.70",
 ]
 
 [project.optional-dependencies]

@@ -14,8 +14,16 @@ nameOverride: ""
 fullnameOverride: ""
 
 service:
-  type: ClusterIP
+  # NodePort so the agent is reachable from the host without a port-forward: the
+  # nodes are on the same libvirt network as the workstation (192.168.56.0/24),
+  # so http://<any-node-ip>:<nodePort> works directly. ClusterIP still does the
+  # job if you would rather tunnel.
+  type: NodePort
   port: 8080
+  # Only read when type is NodePort (or LoadBalancer). Pinned rather than left to
+  # the API server so the URL survives a reinstall; must be inside the cluster's
+  # service-node-port-range, 30000-32767 by default. Set to null to let k8s pick.
+  nodePort: 30080
 
 serviceAccount:
   create: true
@@ -26,17 +34,20 @@ mcp:
   url: http://fathom-mcp.fathom.svc.cluster.local:8080/mcp
 
 ollama:
-  # Dialled through the ExternalName Service below, so the host's address lives in
-  # one place instead of being baked into this URL.
-  url: http://fathom-ollama.fathom.svc.cluster.local:11434
+  # The host's address on the node network, dialled directly -- no DNS involved.
+  # This is OLLAMA_URL as printed by ollama/setup.sh; ollama/config.env is the
+  # source of truth for it, so change it there and re-run setup, then copy here.
+  #
+  # Not a Service name on purpose: resolving one would mean teaching CoreDNS about
+  # .lab, and the cluster's DNS config is deliberately left stock. See the README.
+  url: http://192.168.56.1:11434
   # The alias created by ollama/setup.sh, never the base model tag.
   model: fathom-agent
   service:
-    create: true
+    # The ExternalName Service is off. It renders correctly but does not resolve on
+    # this cluster, and making it resolve requires a CoreDNS change we do not want.
+    create: false
     name: fathom-ollama
-    # Must resolve from inside the cluster. libvirt's dnsmasq serves the host's
-    # /etc/hosts to the VMs, and CoreDNS forwards there -- so an entry on the host
-    # is enough. See the README: this name is not in /etc/hosts yet.
     externalName: localllm.lab
 
 agent:
@@ -49,14 +60,38 @@ agent:
   # Empty means the prompt compiled into the image.
   systemPrompt: ""
 
+otel:
+  # otlp | console | off.
+  #
+  # "console" writes spans to stderr and needs no collector, which is what makes
+  # `make run-local` usable. "off" still installs the context propagator and the
+  # trace ids in logs, so a disabled agent does not break the trace for fathom-mcp.
+  mode: otlp
+  # The collector lives in another namespace, so this has to be an FQDN. The
+  # http:// scheme selects plaintext gRPC; there is no TLS in the lab.
+  endpoint: http://otel-collector.observability.svc.cluster.local:4317
+  # Probes are excluded before sampling, so this only samples real work, and
+  # parentbased means a child never disagrees with its parent.
+  sampler: parentbased_always_on
+  # Milliseconds. 60s keeps the metric stream cheap on a 3-VM lab cluster.
+  metricExportInterval: 60000
+  # Becomes deployment.environment.name on every span and metric.
+  environment: lab
+
 extraEnv: []
 
 resources:
   requests:
     cpu: 100m
-    memory: 256Mi
+    # Raised from 256Mi alongside the limit: grpcio is a native extension with
+    # its own threads, and the batch span processor holds a queue, so baseline
+    # RSS is ~60-90Mi higher than before. Leaving the request low while the
+    # limit rose would just make this pod a better eviction candidate.
+    memory: 384Mi
   limits:
-    memory: 1Gi
+    # The README already lists OOMKilled as a known failure here, and the OTel
+    # SDK lands on top of an import tree that was most of the baseline.
+    memory: 1536Mi
 
 podAnnotations: {}
 podLabels: {}

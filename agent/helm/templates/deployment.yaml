@@ -18,7 +18,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        checksum/config: {{ printf "%s%s%s" (toYaml .Values.agent) (toYaml .Values.ollama) (toYaml .Values.mcp) | sha256sum }}
+        checksum/config: {{ printf "%s%s%s%s" (toYaml .Values.agent) (toYaml .Values.ollama) (toYaml .Values.mcp) (toYaml .Values.otel) | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -68,6 +68,42 @@ spec:
             {{- with .Values.agent.systemPrompt }}
             - name: FATHOM_AGENT_SYSTEM_PROMPT
               value: {{ . | quote }}
+            {{- end }}
+            {{- /*
+              Declared before OTEL_RESOURCE_ATTRIBUTES because the kubelet only
+              expands $(VAR) references to variables defined earlier in this
+              list. The downward API rather than a resource detector: this pod
+              runs with automountServiceAccountToken: false and no RBAC, so
+              anything that queries the API server for these would come back
+              empty.
+            */}}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: FATHOM_AGENT_TELEMETRY
+              value: {{ .Values.otel.mode | quote }}
+            {{- if ne .Values.otel.mode "off" }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.otel.endpoint | quote }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: "grpc"
+            - name: OTEL_TRACES_SAMPLER
+              value: {{ .Values.otel.sampler | quote }}
+            - name: OTEL_METRIC_EXPORT_INTERVAL
+              value: {{ .Values.otel.metricExportInterval | quote }}
+            - name: OTEL_PROPAGATORS
+              value: "tracecontext,baggage"
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME),k8s.node.name=$(NODE_NAME),k8s.deployment.name={{ include "fathom-agent.fullname" . }},service.instance.id=$(POD_NAME),deployment.environment.name={{ .Values.otel.environment }}"
             {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}

@@ -20,7 +20,17 @@ $(VENV)/.stamp: pyproject.toml requirements.lock
 	@touch $@
 
 .PHONY: check
-check: fmt lint test lint-chart
+check: lock-check fmt lint test lint-chart
+
+# The Dockerfile installs requirements.lock and then `pip install --no-deps .`,
+# so the lock is the only source of what ends up in the image -- a dependency
+# added to pyproject.toml without re-running `make lock` builds a green image
+# that dies on ImportError at pod start. There is no CI to catch that, so catch
+# it here.
+.PHONY: lock-check
+lock-check:
+	@[ requirements.lock -nt pyproject.toml ] || \
+	  { echo "requirements.lock is older than pyproject.toml: run 'make lock'"; exit 1; }
 
 .PHONY: fmt
 fmt: venv
@@ -70,7 +80,9 @@ run-local: venv
 lock:
 	@command -v docker >/dev/null 2>&1 || { echo "docker required to regenerate the lock"; exit 1; }
 	docker run --rm -v "$(PWD)":/w -w /w python:3.12-slim sh -c \
-	  'pip install -q --upgrade pip && pip install -q . && pip freeze --exclude-editable | grep -v "^fathom-agent" > requirements.lock'
+	  'pip install -q --upgrade pip && pip install -q . && pip freeze --exclude-editable | grep -v "^fathom-agent" > requirements.lock; \
+	   rm -rf build; chown -R $(shell id -u):$(shell id -g) requirements.lock src'
+	@touch requirements.lock
 
 .PHONY: clean
 clean:

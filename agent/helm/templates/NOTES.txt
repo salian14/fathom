@@ -1,10 +1,23 @@
 fathom-agent {{ .Chart.AppVersion }} installed into namespace {{ include "fathom-agent.namespace" . }}.
 
-Ask it something:
+{{ if eq .Values.service.type "NodePort" -}}
+Reach it from your workstation on any node's IP -- no port-forward needed:
+
+  NODE=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+  export FATHOM=http://$NODE:{{ .Values.service.nodePort | default "<assigned-nodeport>" }}
+{{- if not .Values.service.nodePort }}
+  # nodePort was left unset, so the API server assigned one. Read it back with:
+  #   kubectl -n {{ include "fathom-agent.namespace" . }} get svc {{ include "fathom-agent.fullname" . }} -o jsonpath='{.spec.ports[0].nodePort}'
+{{- end }}
+{{ else -}}
+The Service is {{ .Values.service.type }}, so tunnel to it first:
 
   kubectl -n {{ include "fathom-agent.namespace" . }} port-forward svc/{{ include "fathom-agent.fullname" . }} 8081:{{ .Values.service.port }}
+  export FATHOM=http://localhost:8081
+{{ end }}
+Ask it something:
 
-  curl -s localhost:8081/chat -H 'content-type: application/json' \
+  curl -s $FATHOM/chat -H 'content-type: application/json' \
     -d '{"question":"which pods are not running?"}'
 
 The two endpoints it depends on:
@@ -15,7 +28,7 @@ The two endpoints it depends on:
 Check both at once -- /readyz is 200 only when Ollama answered AND the MCP server
 advertised its tools. A 503 names which one failed:
 
-  curl -s localhost:8081/readyz
+  curl -s $FATHOM/readyz
 
 {{ if .Values.ollama.service.create -}}
 The Ollama Service is an ExternalName alias for {{ .Values.ollama.service.externalName | quote }}.
