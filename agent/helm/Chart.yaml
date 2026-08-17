@@ -1,0 +1,16 @@
+apiVersion: v2
+name: fathom-agent
+description: >-
+  Fathom's agent: a FastAPI service that drives the host-side Ollama model against
+  the read-only Kubernetes tools exposed by fathom-mcp. Ships the ExternalName
+  Service that lets an in-cluster pod reach the model server on the host.
+type: application
+
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - fathom
+  - agent
+  - ollama
+  - kubernetes

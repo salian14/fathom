@@ -1,0 +1,11 @@
+helm/
+tests/
+README.md
+Makefile
+Dockerfile
+.dockerignore
+.venv/
+.ruff_cache/
+.pytest_cache/
+__pycache__/
+*.pyc

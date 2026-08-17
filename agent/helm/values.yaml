@@ -1,0 +1,79 @@
+namespace:
+  name: fathom
+  # False by default: the fathom-mcp chart already creates this namespace, and two
+  # releases both owning a Namespace object collide on install.
+  create: false
+
+replicaCount: 1
+image:
+  repository: registry.lab:5000/fathom-agent
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+mcp:
+  url: http://fathom-mcp.fathom.svc.cluster.local:8080/mcp
+
+ollama:
+  # Dialled through the ExternalName Service below, so the host's address lives in
+  # one place instead of being baked into this URL.
+  url: http://fathom-ollama.fathom.svc.cluster.local:11434
+  # The alias created by ollama/setup.sh, never the base model tag.
+  model: fathom-agent
+  service:
+    create: true
+    name: fathom-ollama
+    # Must resolve from inside the cluster. libvirt's dnsmasq serves the host's
+    # /etc/hosts to the VMs, and CoreDNS forwards there -- so an entry on the host
+    # is enough. See the README: this name is not in /etc/hosts yet.
+    externalName: localllm.lab
+
+agent:
+  logLevel: info
+  maxIterations: 8
+  maxToolChars: 8000
+  requestTimeout: 180s
+  mcpTimeout: 30s
+  readyCache: 30s
+  # Empty means the prompt compiled into the image.
+  systemPrompt: ""
+
+extraEnv: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

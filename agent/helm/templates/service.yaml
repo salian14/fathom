@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fathom-agent.fullname" . }}
+  namespace: {{ include "fathom-agent.namespace" . }}
+  labels:
+    {{- include "fathom-agent.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "fathom-agent.selectorLabels" . | nindent 4 }}

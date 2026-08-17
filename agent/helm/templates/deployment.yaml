@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fathom-agent.fullname" . }}
+  namespace: {{ include "fathom-agent.namespace" . }}
+  labels:
+    {{- include "fathom-agent.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "fathom-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fathom-agent.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ printf "%s%s%s" (toYaml .Values.agent) (toYaml .Values.ollama) (toYaml .Values.mcp) | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "fathom-agent.serviceAccountName" . }}
+      # The agent holds no Kubernetes permissions of its own: every cluster read
+      # goes through fathom-mcp, whose ServiceAccount carries the RBAC. Mounting a
+      # token here would hand the model a second, ungoverned path to the API server.
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: fathom-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: FATHOM_AGENT_ADDR
+              value: ":{{ .Values.service.port }}"
+            - name: FATHOM_AGENT_LOG_LEVEL
+              value: {{ .Values.agent.logLevel | quote }}
+            - name: FATHOM_AGENT_MCP_URL
+              value: {{ .Values.mcp.url | quote }}
+            - name: FATHOM_AGENT_OLLAMA_URL
+              value: {{ .Values.ollama.url | quote }}
+            - name: FATHOM_AGENT_MODEL
+              value: {{ .Values.ollama.model | quote }}
+            - name: FATHOM_AGENT_MAX_ITERATIONS
+              value: {{ .Values.agent.maxIterations | quote }}
+            - name: FATHOM_AGENT_MAX_TOOL_CHARS
+              value: {{ .Values.agent.maxToolChars | quote }}
+            - name: FATHOM_AGENT_REQUEST_TIMEOUT
+              value: {{ .Values.agent.requestTimeout | quote }}
+            - name: FATHOM_AGENT_MCP_TIMEOUT
+              value: {{ .Values.agent.mcpTimeout | quote }}
+            - name: FATHOM_AGENT_READY_CACHE
+              value: {{ .Values.agent.readyCache | quote }}
+            {{- with .Values.agent.systemPrompt }}
+            - name: FATHOM_AGENT_SYSTEM_PROMPT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            # readOnlyRootFilesystem is on, and the interpreter still wants a
+            # scratch directory; HOME is pointed here in the image.
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            # Python plus the LangChain import tree takes seconds to become
+            # listenable, unlike the Go binary this mirrors.
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

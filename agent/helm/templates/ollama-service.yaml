@@ -1,0 +1,32 @@
+{{- if .Values.ollama.service.create }}
+{{/*
+The one piece of this chart that is not a copy of the MCP chart's shape.
+
+Ollama runs on the host, outside the cluster, so there is no Deployment to select
+and no Endpoints to populate from one. ExternalName makes the host reachable under
+a normal in-cluster DNS name: a pod resolving fathom-ollama.fathom.svc.cluster.local
+gets a CNAME to ollama.service.externalName, which CoreDNS resolves through its
+upstream forwarder.
+
+That upstream is the node's resolver, which on this lab is libvirt's dnsmasq -- and
+dnsmasq serves the host's /etc/hosts. So a name in /etc/hosts on the host reaches
+pods, which is the whole reason this works with a machine that has no real DNS
+record.
+
+No spec.ports: ExternalName ignores them. The port travels in ollama.url instead,
+which is also where a scheme change would go.
+
+If the name does not resolve from inside the cluster, set ollama.service.create to
+false and point ollama.url straight at the host's address on the node network.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.ollama.service.name }}
+  namespace: {{ include "fathom-agent.namespace" . }}
+  labels:
+    {{- include "fathom-agent.labels" . | nindent 4 }}
+spec:
+  type: ExternalName
+  externalName: {{ .Values.ollama.service.externalName | quote }}
+{{- end }}
