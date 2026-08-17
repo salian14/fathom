@@ -1,0 +1,15 @@
+apiVersion: v2
+name: fathom-mcp
+description: >-
+  Fathom's MCP tool server: read-only Kubernetes access (k8s_get, k8s_describe,
+  k8s_log) exposed to the agent over MCP. Ships the ServiceAccount and RBAC that
+  scope what the agent can see.
+type: application
+
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - fathom
+  - mcp
+  - kubernetes

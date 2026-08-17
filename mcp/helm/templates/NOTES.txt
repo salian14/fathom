@@ -1,0 +1,41 @@
+fathom-mcp {{ .Chart.AppVersion }} is deployed as {{ include "fathom-mcp.fullname" . }} in
+namespace {{ include "fathom-mcp.namespace" . }}{{ if .Values.namespace.create }} (created by this chart){{ end }}.
+
+The agent reaches it in-cluster at:
+
+  http://{{ include "fathom-mcp.fullname" . }}.{{ include "fathom-mcp.namespace" . }}.svc.cluster.local:{{ .Values.service.port }}{{ .Values.server.path }}
+
+Put that endpoint in the agent chart's values -- it is the MCP server URL, not
+the Ollama URL, which still points at the host outside the cluster.
+
+Tools exposed: k8s_get, k8s_describe, k8s_log. All read-only.
+
+Readable resource types ({{ len .Values.k8s.allowedResources }}):
+{{- range .Values.k8s.allowedResources }}
+  - {{ . }}
+{{- end }}
+
+{{ if .Values.k8s.allowedNamespaces -}}
+Namespaced reads are restricted to: {{ join ", " .Values.k8s.allowedNamespaces }}
+{{- else -}}
+Namespaced reads are not restricted by namespace; RBAC is the only limit.
+{{- end }}
+
+{{ if .Values.rbac.namespaces -}}
+WARNING: rbac.namespaces is set, so permissions come from Roles in
+{{ join ", " .Values.rbac.namespaces }} rather than a ClusterRole. A Role cannot
+grant cluster-scoped types, so any of these entries in k8s.allowedResources will
+be offered to the model and then fail with a permission error when it asks:
+nodes, namespaces, persistentvolumes. Trim allowedResources to match.
+{{- end }}
+
+Check it came up:
+
+  kubectl -n {{ include "fathom-mcp.namespace" . }} rollout status deploy/{{ include "fathom-mcp.fullname" . }}
+  kubectl -n {{ include "fathom-mcp.namespace" . }} port-forward svc/{{ include "fathom-mcp.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl -s localhost:{{ .Values.service.port }}/readyz
+
+Confirm the grant matches what you intended:
+
+  kubectl auth can-i --list \
+    --as=system:serviceaccount:{{ include "fathom-mcp.namespace" . }}:{{ include "fathom-mcp.serviceAccountName" . }}

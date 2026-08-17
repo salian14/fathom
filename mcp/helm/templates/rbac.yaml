@@ -1,0 +1,69 @@
+{{- /*
+  The agent's permissions. k8s.allowedNamespaces is not enforced here -- the
+  server applies that itself, before it makes a request. This is the second,
+  independent limit: what the API server itself will allow.
+*/ -}}
+{{- if .Values.rbac.create }}
+{{- if .Values.rbac.namespaces }}
+{{- /*
+  Namespace-scoped grant: a Role and RoleBinding in each listed namespace.
+  Tighter than a ClusterRole, at the cost of cluster-scoped types.
+*/ -}}
+{{- range $namespace := .Values.rbac.namespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "fathom-mcp.fullname" $ }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "fathom-mcp.labels" $ | nindent 4 }}
+rules:
+  {{- include "fathom-mcp.rbacRules" $ | trim | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "fathom-mcp.fullname" $ }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "fathom-mcp.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "fathom-mcp.fullname" $ }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "fathom-mcp.serviceAccountName" $ }}
+    namespace: {{ include "fathom-mcp.namespace" $ }}
+{{- end }}
+{{- else }}
+{{- /*
+  Cluster-scoped grant, the default. Fathom answers questions about the cluster,
+  which includes nodes and namespaces -- types a Role cannot reach.
+*/ -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "fathom-mcp.fullname" . }}
+  labels:
+    {{- include "fathom-mcp.labels" . | nindent 4 }}
+rules:
+  {{- include "fathom-mcp.rbacRules" . | trim | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "fathom-mcp.fullname" . }}
+  labels:
+    {{- include "fathom-mcp.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "fathom-mcp.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "fathom-mcp.serviceAccountName" . }}
+    namespace: {{ include "fathom-mcp.namespace" . }}
+{{- end }}
+{{- end }}

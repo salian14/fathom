@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fathom-mcp.fullname" . }}
+  namespace: {{ include "fathom-mcp.namespace" . }}
+  labels:
+    {{- include "fathom-mcp.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "fathom-mcp.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fathom-mcp.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ toYaml .Values.k8s | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "fathom-mcp.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: fathom-mcp
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: FATHOM_MCP_TRANSPORT
+              value: {{ .Values.server.transport | quote }}
+            - name: FATHOM_MCP_ADDR
+              value: ":{{ .Values.service.port }}"
+            - name: FATHOM_MCP_MCP_PATH
+              value: {{ .Values.server.path | quote }}
+            - name: FATHOM_MCP_LOG_LEVEL
+              value: {{ .Values.server.logLevel | quote }}
+            - name: FATHOM_MCP_ALLOWED_RESOURCES
+              value: {{ join "," .Values.k8s.allowedResources | quote }}
+            - name: FATHOM_MCP_ALLOWED_NAMESPACES
+              value: {{ join "," .Values.k8s.allowedNamespaces | quote }}
+            - name: FATHOM_MCP_DEFAULT_NAMESPACE
+              value: {{ .Values.k8s.defaultNamespace | quote }}
+            - name: FATHOM_MCP_MAX_BYTES
+              value: {{ .Values.limits.maxBytes | quote }}
+            - name: FATHOM_MCP_LIST_LIMIT
+              value: {{ .Values.limits.listLimit | quote }}
+            - name: FATHOM_MCP_LOG_TAIL_LINES
+              value: {{ .Values.limits.logTailLines | quote }}
+            - name: FATHOM_MCP_LOG_MAX_TAIL_LINES
+              value: {{ .Values.limits.logMaxTailLines | quote }}
+            - name: FATHOM_MCP_LOG_MAX_BYTES
+              value: {{ .Values.limits.logMaxBytes | quote }}
+            - name: FATHOM_MCP_REQUEST_TIMEOUT
+              value: {{ .Values.limits.requestTimeout | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 20
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,86 @@
+namespace:
+  name: fathom
+  create: true
+
+replicaCount: 1
+image:
+  repository: fathom-mcp
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+service:
+  type: ClusterIP
+  port: 8080
+k8s:
+  allowedResources:
+    - pods
+    - services
+    - nodes
+    - namespaces
+    - events
+    - configmaps
+    - persistentvolumeclaims
+    - serviceaccounts
+    - endpoints
+    - replicationcontrollers
+    - deployments.apps
+    - replicasets.apps
+    - statefulsets.apps
+    - daemonsets.apps
+    - jobs.batch
+    - cronjobs.batch
+    - ingresses.networking.k8s.io
+    - networkpolicies.networking.k8s.io
+  allowedNamespaces: []
+  defaultNamespace: default
+
+rbac:
+  create: true
+  namespaces: []
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+limits:
+  maxBytes: 65536
+  listLimit: 200
+  logTailLines: 200
+  logMaxTailLines: 2000
+  logMaxBytes: 32768
+  requestTimeout: 30s
+
+server:
+  transport: http
+  path: /mcp
+  logLevel: info
+
+extraEnv: []
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
