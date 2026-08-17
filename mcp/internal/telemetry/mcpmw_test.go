@@ -150,8 +150,87 @@ func TestReceivingExtractsTraceparentFromHeader(t *testing.T) {
 	}
 }
 
+// The readiness probe opens a full MCP session with instrumentation
+// suppressed, so its requests arrive over HTTP with no trace context. Tracing
+// that session costs eight spans every time the probe runs.
+func TestReceivingSkipsUnparentedSessionLifecycle(t *testing.T) {
+	sr, tracer := recorder(t)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+
+	handler := Receiving(tracer, nil)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
+		return &mcp.CallToolResult{}, nil
+	})
+
+	for _, method := range []string{"initialize", "notifications/initialized", "tools/list"} {
+		req := &mcp.ServerRequest[*mcp.CallToolParamsRaw]{
+			Params: &mcp.CallToolParamsRaw{},
+			Extra:  &mcp.RequestExtra{Header: http.Header{}}, // over HTTP, unparented
+		}
+		if _, err := handler(context.Background(), method, req); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := len(sr.Ended()); got != 0 {
+		t.Errorf("probe session produced %d spans, want 0", got)
+	}
+}
+
+// The exemption that keeps the previous test honest: if propagation ever
+// breaks, real work must surface as root spans rather than go silent.
+func TestReceivingTracesUnparentedToolCalls(t *testing.T) {
+	sr, tracer := recorder(t)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+
+	handler := Receiving(tracer, nil)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
+		return &mcp.CallToolResult{}, nil
+	})
+
+	req := &mcp.ServerRequest[*mcp.CallToolParamsRaw]{
+		Params: &mcp.CallToolParamsRaw{Name: "k8s_get"},
+		Extra:  &mcp.RequestExtra{Header: http.Header{}},
+	}
+	if _, err := handler(context.Background(), "tools/call", req); err != nil {
+		t.Fatal(err)
+	}
+
+	ended := sr.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("recorded %d spans, want 1: a tools/call must never be dropped", len(ended))
+	}
+	if ended[0].Name() != "tools/call k8s_get" {
+		t.Errorf("span name = %q", ended[0].Name())
+	}
+}
+
+// A parented session is real work, not a probe, and stays traced.
+func TestReceivingTracesParentedSessionLifecycle(t *testing.T) {
+	sr, tracer := recorder(t)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+
+	header := http.Header{}
+	header.Set("traceparent", sampledTraceparent)
+
+	handler := Receiving(tracer, nil)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
+		return &mcp.CallToolResult{}, nil
+	})
+
+	req := &mcp.ServerRequest[*mcp.CallToolParamsRaw]{
+		Params: &mcp.CallToolParamsRaw{},
+		Extra:  &mcp.RequestExtra{Header: header},
+	}
+	if _, err := handler(context.Background(), "initialize", req); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := len(sr.Ended()); got != 1 {
+		t.Errorf("parented initialize produced %d spans, want 1", got)
+	}
+}
+
 // Under stdio there is no HTTP layer, so Extra is nil. That must yield a clean
-// root span rather than a panic.
+// root span rather than a panic -- and the unparented rules must not apply
+// there, since stdio has no probe traffic and never carries trace context.
 func TestReceivingHandlesMissingExtra(t *testing.T) {
 	sr, tracer := recorder(t)
 

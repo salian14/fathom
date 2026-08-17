@@ -132,13 +132,10 @@ func serveHTTP(ctx context.Context, cfg *config.Config, srv *mcp.Server, client 
 
 	httpSrv := &http.Server{
 		Addr: cfg.Addr,
-		// The probes are filtered out rather than sampled away: kubelet hits
-		// them every 10-20s for the life of the pod, and they say nothing that
-		// a span could add.
+		// Probes and unparented traffic are filtered out rather than sampled
+		// away -- see telemetry.TraceHTTPRequest for why both qualify.
 		Handler: otelhttp.NewHandler(mux, "fathom-mcp",
-			otelhttp.WithFilter(func(r *http.Request) bool {
-				return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
-			}),
+			otelhttp.WithFilter(telemetry.TraceHTTPRequest),
 			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 				return r.Method + " " + r.URL.Path
 			}),

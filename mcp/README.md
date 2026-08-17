@@ -286,6 +286,17 @@ For a local run, `FATHOM_MCP_TELEMETRY=console make run-stdio` prints spans to
 **stderr**. That is not incidental: under the stdio transport stdout carries the
 JSON-RPC stream, so a span written there would corrupt the protocol.
 
-The probes are deliberately untraced, and so is Kubernetes discovery traffic —
-`/readyz` alone would otherwise emit a root span every ten seconds for the life
-of the pod.
+Three kinds of traffic are deliberately untraced, all of them repeating for the
+life of the pod and none of them saying anything a span could add:
+
+- the probes themselves;
+- Kubernetes discovery, which client-go issues without a context and which
+  could therefore only ever produce root spans;
+- inbound MCP requests carrying no trace context. The agent propagates on every
+  real call, and the one path where it deliberately does not is its readiness
+  check — which opens a full MCP session and would otherwise cost eight spans
+  every time it ran.
+
+`tools/call` is exempt from that last rule. It is the actual work and it is low
+volume, so keeping it means a propagation failure shows up as unparented root
+spans rather than as silence.

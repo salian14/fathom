@@ -60,8 +60,25 @@ func Receiving(tracer trace.Tracer, duration metric.Float64Histogram) mcp.Middle
 				return next(ctx, method, req)
 			}
 
-			if extra := req.GetExtra(); extra != nil && extra.Header != nil {
+			extra := req.GetExtra()
+			overHTTP := extra != nil && extra.Header != nil
+			if overHTTP {
 				ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.HeaderCarrier(extra.Header))
+			}
+
+			// Session lifecycle from an unparented HTTP caller is the agent's
+			// readiness check: it suppresses instrumentation deliberately, so
+			// its requests carry no trace context, and tracing the session it
+			// opens costs eight spans per probe forever.
+			//
+			// tools/call is exempt on purpose. It is the actual work, it is
+			// low volume, and keeping it means a propagation failure shows up
+			// as root spans rather than as silence.
+			//
+			// Neither rule applies under stdio, where Extra is nil and there
+			// is no probe traffic to begin with.
+			if overHTTP && method != methodToolCall && !trace.SpanContextFromContext(ctx).IsValid() {
+				return next(ctx, method, req)
 			}
 
 			name, attrs := describeCall(method, req)

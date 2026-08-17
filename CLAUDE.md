@@ -84,9 +84,12 @@ Two rules when touching this:
 
 - **Adding a boundary means instrumenting it.** Prefer the auto-instrumentation libraries over
   hand-rolled spans; reach for a manual span only where no instrumentor can see the seam.
-- **Probes are excluded, not sampled.** `/healthz` and `/readyz` produce no spans on either side,
-  and the agent suppresses instrumentation around its dependency checks — otherwise each probe
-  starts its own root trace every few seconds, forever.
+- **Probes are excluded, not sampled.** `/healthz` and `/readyz` produce no spans on either side.
+  The agent suppresses instrumentation around its dependency checks and opens their MCP session
+  without a span; `fathom-mcp` in turn drops inbound requests that carry no trace context, since
+  that is exactly what the suppressed probe looks like from the far side. `tools/call` is exempt,
+  so a propagation failure surfaces as root spans rather than silence. Verified end to end: a
+  probe cycle emits zero spans, a real `/chat` emits one trace across both services.
 
 Metric labels must stay low-cardinality: resource kinds, tool names, and error classes are safe;
 object names, selectors, session ids, and question text are span attributes only.
