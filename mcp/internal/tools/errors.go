@@ -6,6 +6,44 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
+// Error classes. Low cardinality by construction, so they are safe as both
+// span attributes and metric dimensions.
+const (
+	errNone         = ""
+	errNotFound     = "not_found"
+	errForbidden    = "forbidden"
+	errUnauthorized = "unauthorized"
+	errTimeout      = "timeout"
+	errInvalid      = "invalid"
+	errOther        = "other"
+)
+
+// ErrorClass normalises a Kubernetes API error to one of a fixed set of
+// labels.
+//
+// It exists because apiError immediately rewrites these errors into prose for
+// the model, and prose cannot be grouped or counted. This is the last point at
+// which the typed error is still available, so classify here and let apiError
+// do its own job.
+func ErrorClass(err error) string {
+	switch {
+	case err == nil:
+		return errNone
+	case apierrors.IsNotFound(err):
+		return errNotFound
+	case apierrors.IsForbidden(err):
+		return errForbidden
+	case apierrors.IsUnauthorized(err):
+		return errUnauthorized
+	case apierrors.IsTimeout(err), apierrors.IsServerTimeout(err), apierrors.IsTooManyRequests(err):
+		return errTimeout
+	case apierrors.IsInvalid(err), apierrors.IsBadRequest(err):
+		return errInvalid
+	default:
+		return errOther
+	}
+}
+
 func apiError(err error, resource, namespace, name string) error {
 	target := resource
 	if name != "" {

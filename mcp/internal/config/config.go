@@ -64,6 +64,18 @@ type Config struct {
 
 	// LogLevel for the server's own structured logs.
 	LogLevel slog.Level
+
+	// Telemetry selects where traces and metrics go: "otlp" to the collector
+	// named by OTEL_EXPORTER_OTLP_ENDPOINT, "console" to stderr, or "off".
+	//
+	// This is the only telemetry setting with a FATHOM_MCP_ prefix. Everything
+	// else -- endpoint, sampler, resource attributes, export interval -- uses
+	// the standard OTEL_* variables, which the SDK reads directly. Mirroring
+	// those here would duplicate the SDK's own validation and give every knob
+	// two spellings; this one earns its place because it decides which
+	// exporter gets built, and because "console" is what makes running the
+	// server locally pleasant.
+	Telemetry string
 }
 
 var defaultAllowedResources = []string{
@@ -96,6 +108,7 @@ func Load() (*Config, error) {
 		AllowedResources:  csv(env("ALLOWED_RESOURCES", strings.Join(defaultAllowedResources, ","))),
 		AllowedNamespaces: csv(env("ALLOWED_NAMESPACES", "")),
 		DefaultNamespace:  env("DEFAULT_NAMESPACE", "default"),
+		Telemetry:         env("TELEMETRY", "otlp"),
 	}
 
 	var err error
@@ -163,6 +176,12 @@ func (c *Config) validate() error {
 	}
 	if c.RequestTimeout <= 0 {
 		return fmt.Errorf("%sREQUEST_TIMEOUT must be > 0, got %s", envPrefix, c.RequestTimeout)
+	}
+	switch c.Telemetry {
+	case "otlp", "console", "off":
+	default:
+		return fmt.Errorf("%sTELEMETRY: want \"otlp\", \"console\" or \"off\", got %q",
+			envPrefix, c.Telemetry)
 	}
 	return nil
 }

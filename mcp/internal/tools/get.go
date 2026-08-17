@@ -88,6 +88,7 @@ func (s *Server) getObject(ctx context.Context, mapping *meta.RESTMapping, names
 		SetHeader("Accept", "application/json").
 		DoRaw(ctx)
 	if err != nil {
+		s.failed(ctx, "k8s_get", mapping.Resource.Resource, err)
 		return "", apiError(err, mapping.Resource.Resource, namespace, name)
 	}
 
@@ -125,6 +126,7 @@ func (s *Server) listObjects(ctx context.Context, mapping *meta.RESTMapping, nam
 
 	raw, err := req.DoRaw(ctx)
 	if err != nil {
+		s.failed(ctx, "k8s_get", mapping.Resource.Resource, err)
 		return "", apiError(err, mapping.Resource.Resource, namespace, "")
 	}
 

@@ -17,6 +17,11 @@ func TestLoadDefaults(t *testing.T) {
 	if c.RequestTimeout != 30*time.Second {
 		t.Errorf("RequestTimeout = %s, want 30s", c.RequestTimeout)
 	}
+	// Telemetry defaults on: a deploy that forgets to set it should still be
+	// observable, and an unreachable collector degrades to no-ops anyway.
+	if c.Telemetry != "otlp" {
+		t.Errorf("Telemetry = %q, want otlp", c.Telemetry)
+	}
 
 	// The default allowlist must not hand a model the cluster's credentials.
 	// Read-only is not the same claim as safe to read.
@@ -32,6 +37,7 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("FATHOM_MCP_ALLOWED_RESOURCES", " pods , deployments.apps ,")
 	t.Setenv("FATHOM_MCP_ALLOWED_NAMESPACES", "default,fathom")
 	t.Setenv("FATHOM_MCP_REQUEST_TIMEOUT", "5s")
+	t.Setenv("FATHOM_MCP_TELEMETRY", "console")
 
 	c, err := Load()
 	if err != nil {
@@ -48,6 +54,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if c.RequestTimeout != 5*time.Second {
 		t.Errorf("RequestTimeout = %s, want 5s", c.RequestTimeout)
+	}
+	if c.Telemetry != "console" {
+		t.Errorf("Telemetry = %q, want console", c.Telemetry)
 	}
 }
 
@@ -70,6 +79,7 @@ func TestLoadRejectsBadConfig(t *testing.T) {
 		"bad duration":          {"FATHOM_MCP_REQUEST_TIMEOUT": "soon"},
 		"tail above ceiling":    {"FATHOM_MCP_LOG_TAIL_LINES": "5000", "FATHOM_MCP_LOG_MAX_TAIL_LINES": "2000"},
 		"relative mcp path":     {"FATHOM_MCP_MCP_PATH": "mcp"},
+		"unknown telemetry":     {"FATHOM_MCP_TELEMETRY": "jaeger"},
 	}
 
 	for name, env := range cases {

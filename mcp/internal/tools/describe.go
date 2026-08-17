@@ -3,8 +3,10 @@ package tools
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"k8s.io/client-go/rest"
 	"k8s.io/kubectl/pkg/describe"
 )
 
@@ -42,45 +44,52 @@ func (s *Server) handleDescribe(ctx context.Context, _ *mcp.CallToolRequest, in 
 		showEvents = *in.ShowEvents
 	}
 
-	describer, ok := describe.DescriberFor(mapping.GroupVersionKind.GroupKind(), s.client.Config)
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
+	describer, ok := describe.DescriberFor(mapping.GroupVersionKind.GroupKind(), s.describeConfig(ctx))
 	if !ok {
-		describer, ok = describe.GenericDescriberFor(mapping, s.client.Config)
+		describer, ok = describe.GenericDescriberFor(mapping, s.describeConfig(ctx))
 		if !ok {
 			return nil, nil, fmt.Errorf("cannot describe %s; use k8s_get to read the object instead",
 				mapping.Resource.Resource)
 		}
 	}
 
-	ctx, cancel := s.withTimeout(ctx)
-	defer cancel()
-
-	out, err := s.describeWithContext(ctx, describer, namespace, in.Name, showEvents)
+	out, err := describer.Describe(namespace, in.Name, describe.DescriberSettings{
+		ShowEvents: showEvents,
+		ChunkSize:  500,
+	})
 	if err != nil {
+		s.failed(ctx, "k8s_describe", mapping.Resource.Resource, err)
 		return nil, nil, apiError(err, mapping.Resource.Resource, namespace, in.Name)
 	}
 
 	return text(truncate(out, s.cfg.MaxBytes, keepHead)), nil, nil
 }
 
-func (s *Server) describeWithContext(ctx context.Context, d describe.ResourceDescriber, namespace, name string, showEvents bool) (string, error) {
-	type result struct {
-		out string
-		err error
-	}
-	done := make(chan result, 1)
-
-	go func() {
-		out, err := d.Describe(namespace, name, describe.DescriberSettings{
-			ShowEvents: showEvents,
-			ChunkSize:  500,
+// describeConfig returns a REST config whose requests carry ctx.
+//
+// kubectl's describer builds its own clients and its Describe method takes no
+// context, so without this its calls would run with context.Background(): the
+// request timeout would not reach them, and they would show up as orphan root
+// spans rather than children of the tool call. Wrapping here re-attaches the
+// context at the transport, which is the only seam the describer leaves open.
+//
+// This replaces an earlier version that ran Describe on a detached goroutine
+// and selected on ctx.Done(). That bounded the *caller* but never cancelled
+// the work -- the goroutine kept querying the API server after the tool had
+// already returned.
+func (s *Server) describeConfig(ctx context.Context) *rest.Config {
+	cfg := rest.CopyConfig(s.client.Config)
+	cfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
+		return roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return rt.RoundTrip(r.WithContext(ctx))
 		})
-		done <- result{out, err}
-	}()
-
-	select {
-	case r := <-done:
-		return r.out, r.err
-	case <-ctx.Done():
-		return "", fmt.Errorf("describe timed out after %s: %w", s.cfg.RequestTimeout, ctx.Err())
-	}
+	})
+	return cfg
 }
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

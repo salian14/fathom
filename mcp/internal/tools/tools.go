@@ -1,3 +1,5 @@
+package tools
+
 import (
 	"context"
 	"fmt"
@@ -5,6 +7,10 @@ import (
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/apimachinery/pkg/api/meta"
 
 	"github.com/spellbound/fathom/mcp/internal/config"
@@ -15,10 +21,53 @@ type Server struct {
 	cfg    *config.Config
 	client *kube.Client
 	log    *slog.Logger
+
+	// Nil when the meter could not build it; every use is guarded. A missing
+	// counter is not a reason to fail a tool call.
+	errors metric.Int64Counter
 }
 
 func New(cfg *config.Config, client *kube.Client, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, client: client, log: log}
+	s := &Server{cfg: cfg, client: client, log: log}
+
+	// Resolved from the global meter, which is a no-op until telemetry.Setup
+	// installs a real one. That makes this safe to call from tests too.
+	counter, err := otel.Meter("github.com/spellbound/fathom/mcp").Int64Counter(
+		"mcp.tool.errors",
+		metric.WithDescription("Kubernetes API errors surfaced by a tool, by class."),
+		metric.WithUnit("{error}"))
+	if err == nil {
+		s.errors = counter
+	}
+	return s
+}
+
+// failed records a failed Kubernetes read on the active span, the metric
+// stream and the log, then hands back the model-facing error.
+//
+// It exists so the three handlers classify errors identically, and so the
+// classification happens while the typed error is still intact -- apiError
+// rewrites it into prose one call later, after which "was this a 403 or a
+// 404" is no longer answerable.
+func (s *Server) failed(ctx context.Context, tool, resource string, err error) {
+	class := ErrorClass(err)
+
+	span := trace.SpanFromContext(ctx)
+	span.SetAttributes(attribute.String("error.type", class))
+	span.RecordError(err)
+
+	if s.errors != nil {
+		// tool and class are both closed sets; resource is allowlisted to 18
+		// values. No object names here -- those stay on the span.
+		s.errors.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("tool", tool),
+			attribute.String("resource", resource),
+			attribute.String("error_class", class),
+		))
+	}
+
+	s.log.WarnContext(ctx, "kubernetes read failed",
+		"tool", tool, "resource", resource, "error_class", class, "error", err)
 }
 
 func (s *Server) Register(srv *mcp.Server) {

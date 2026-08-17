@@ -12,10 +12,12 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"k8s.io/klog/v2"
 
 	"github.com/spellbound/fathom/mcp/internal/config"
 	"github.com/spellbound/fathom/mcp/internal/kube"
+	"github.com/spellbound/fathom/mcp/internal/telemetry"
 	"github.com/spellbound/fathom/mcp/internal/tools"
 )
 
@@ -34,14 +36,36 @@ func run() error {
 		return err
 	}
 
-	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	log := slog.New(telemetry.NewSlogHandler(
+		slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel})))
 	klog.SetSlogLogger(log)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Set up before the transport branch below: installing this inside
+	// serveHTTP would leave the stdio path -- the one used when debugging a
+	// tool locally -- with no traces at all.
+	shutdownTelemetry, err := telemetry.Setup(ctx, cfg.Telemetry, "fathom-mcp", version, log)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// Fresh context: ctx is already cancelled by the time this runs, and a
+		// flush needs a live deadline to reach the collector.
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTelemetry(flushCtx); err != nil {
+			log.Warn("telemetry shutdown", "error", err)
+		}
+	}()
 
 	client, err := kube.New(kube.Options{
 		KubeconfigPath: cfg.KubeconfigPath,
 		UserAgent:      "fathom-mcp/" + version,
 		QPS:            20,
 		Burst:          40,
+		Trace:          cfg.Telemetry != "off",
 	})
 	if err != nil {
 		return err
@@ -57,8 +81,13 @@ func run() error {
 	})
 	tools.New(cfg, client, log).Register(srv)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	// Protocol-level spans, which is where the agent's traceparent is actually
+	// reachable -- see telemetry.Receiving. Registered for both transports.
+	mw, err := telemetry.ReceivingMiddleware()
+	if err != nil {
+		return err
+	}
+	srv.AddReceivingMiddleware(mw)
 
 	log.Info("starting",
 		"version", version,
@@ -76,7 +105,7 @@ func serveHTTP(ctx context.Context, cfg *config.Config, srv *mcp.Server, client 
 	handler := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },
 		&mcp.StreamableHTTPOptions{
-			Logger: log,
+			Logger:         log,
 			SessionTimeout: 10 * time.Minute,
 		},
 	)
@@ -102,9 +131,20 @@ func serveHTTP(ctx context.Context, cfg *config.Config, srv *mcp.Server, client 
 	})
 
 	httpSrv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           mux,
+		Addr: cfg.Addr,
+		// The probes are filtered out rather than sampled away: kubelet hits
+		// them every 10-20s for the life of the pod, and they say nothing that
+		// a span could add.
+		Handler: otelhttp.NewHandler(mux, "fathom-mcp",
+			otelhttp.WithFilter(func(r *http.Request) bool {
+				return r.URL.Path != "/healthz" && r.URL.Path != "/readyz"
+			}),
+			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+				return r.Method + " " + r.URL.Path
+			}),
+		),
 		ReadHeaderTimeout: 10 * time.Second,
+		// Deliberately no WriteTimeout: responses here are SSE streams.
 		IdleTimeout: 120 * time.Second,
 	}
 

@@ -4,7 +4,7 @@ namespace:
 
 replicaCount: 1
 image:
-  repository: fathom-mcp
+  repository: registry.lab:5000/fathom-mcp
   tag: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
@@ -56,14 +56,36 @@ server:
   path: /mcp
   logLevel: info
 
+otel:
+  # otlp | console | off.
+  #
+  # "console" writes spans to stderr and needs no collector, which is what makes
+  # `make run-stdio` useful -- stderr, not stdout, because stdout carries the
+  # JSON-RPC stream under the stdio transport. "off" still installs the context
+  # propagator, so a disabled server does not break the trace for the next hop.
+  mode: otlp
+  # The collector lives in another namespace, so this has to be an FQDN. The
+  # http:// scheme is what selects plaintext gRPC; there is no TLS in the lab.
+  endpoint: http://otel-collector.observability.svc.cluster.local:4317
+  # Probes are filtered out before sampling, so this only ever samples real
+  # work, and parentbased means a child never disagrees with its parent.
+  sampler: parentbased_always_on
+  # Milliseconds. 60s keeps the metric stream cheap on a 3-VM lab cluster.
+  metricExportInterval: 60000
+  # Becomes deployment.environment.name on every span and metric.
+  environment: lab
+
 extraEnv: []
 
 resources:
   requests:
-    cpu: 50m
-    memory: 64Mi
+    # Raised from 50m/64Mi with the OTel SDK: a gRPC client and the batch span
+    # processor's queue are ~20-30Mi steady-state, and 256Mi was already tight
+    # for a binary that embeds kubectl's describer.
+    cpu: 100m
+    memory: 96Mi
   limits:
-    memory: 256Mi
+    memory: 384Mi
 
 podAnnotations: {}
 podLabels: {}

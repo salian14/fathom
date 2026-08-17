@@ -76,6 +76,7 @@ func (s *Server) handleLog(ctx context.Context, _ *mcp.CallToolRequest, in logIn
 		GetLogs(in.Name, opts).
 		Stream(ctx)
 	if err != nil {
+		s.failed(ctx, "k8s_log", "pods", err)
 		return nil, nil, logError(err, namespace, in.Name, in.Container, in.Previous)
 	}
 	defer stream.Close()

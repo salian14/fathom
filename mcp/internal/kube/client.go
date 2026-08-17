@@ -2,8 +2,11 @@ package kube
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 
+	"github.com/spellbound/fathom/mcp/internal/telemetry"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
@@ -15,18 +18,22 @@ import (
 )
 
 type Client struct {
-	Config *rest.Config
+	Config    *rest.Config
 	Clientset kubernetes.Interface
-	REST rest.Interface
-	mapper *restmapper.DeferredDiscoveryRESTMapper
-	disco  discovery.CachedDiscoveryInterface
+	REST      rest.Interface
+	mapper    *restmapper.DeferredDiscoveryRESTMapper
+	disco     discovery.CachedDiscoveryInterface
 }
 
 type Options struct {
 	KubeconfigPath string
-	UserAgent string
-	QPS   float32
-	Burst int
+	UserAgent      string
+	QPS            float32
+	Burst          int
+
+	// Trace wraps the REST transport so every call into the Kubernetes API
+	// becomes a client span.
+	Trace bool
 }
 
 func New(opts Options) (*Client, error) {
@@ -43,6 +50,22 @@ func New(opts Options) (*Client, error) {
 	}
 	if opts.Burst > 0 {
 		cfg.Burst = opts.Burst
+	}
+
+	if opts.Trace {
+		// One hook covers everything that talks to the API server: the
+		// clientset, the raw REST client, discovery, pod log streams, and --
+		// because Config is handed to it verbatim -- kubectl's describer.
+		// It has to go on before NewForConfig, which snapshots the transport.
+		cfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
+			return otelhttp.NewTransport(rt,
+				otelhttp.WithFilter(telemetry.TraceKubeRequest),
+				// Paths carry object names, so the default URL-based span name
+				// would make every pod its own operation in the backend's UI.
+				otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+					return "k8s " + r.Method
+				}))
+		})
 	}
 
 	clientset, err := kubernetes.NewForConfig(cfg)
