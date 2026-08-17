@@ -59,10 +59,26 @@ async def tool_session(cfg: Config, client: MultiServerMCPClient) -> AsyncIterat
     meaningful rather than to whatever happened to be current.
     """
     with telemetry.tracer().start_as_current_span("mcp.session") as span:
-        async with client.session("fathom") as session:
-            tools = await load_mcp_tools(session)
+        async with untraced_tool_session(cfg, client) as tools:
             span.set_attribute("mcp.tool.count", len(tools))
-            yield [_bounded(tool, cfg.max_tool_chars) for tool in tools]
+            yield tools
+
+
+@contextlib.asynccontextmanager
+async def untraced_tool_session(
+    cfg: Config, client: MultiServerMCPClient
+) -> AsyncIterator[list[BaseTool]]:
+    """tool_session without the span, for the readiness probe.
+
+    suppress_instrumentation() silences the instrumentation libraries, but it
+    does not reach a span opened by hand -- so calling tool_session on the probe
+    path would still start one root trace per check, forever. That is the exact
+    noise the probe exclusions exist to prevent, so the probe opens its session
+    through here instead.
+    """
+    async with client.session("fathom") as session:
+        tools = await load_mcp_tools(session)
+        yield [_bounded(tool, cfg.max_tool_chars) for tool in tools]
 
 
 def truncate(text: str, limit: int) -> str:

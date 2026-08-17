@@ -29,7 +29,7 @@ from . import __version__, telemetry
 from .agent import build_graph, build_messages, summarise
 from .config import Config, load
 from .llm import build_model
-from .mcp_client import build_client, tool_session
+from .mcp_client import build_client, tool_session, untraced_tool_session
 
 log = logging.getLogger("fathom_agent")
 
@@ -196,7 +196,7 @@ async def _probe_dependencies(cfg: Config, mcp) -> str | None:
         return f"ollama unreachable at {cfg.ollama_url}: {err}"
 
     try:
-        async with tool_session(cfg, mcp) as tools:
+        async with untraced_tool_session(cfg, mcp) as tools:
             if not tools:
                 return f"mcp server at {cfg.mcp_url} advertised no tools"
     except Exception as err:  # noqa: BLE001
