@@ -20,7 +20,7 @@ The metrics tools (list_metrics, describe_metric, run_promql) are NOT registered
 prometheus.url is empty. Set it to register them, e.g.
 
   helm upgrade fathom-mcp ./helm \
-    --set prometheus.url=http://prometheus.observability.svc.cluster.local:9090
+    --set prometheus.url=http://prometheus-server.observability.svc.cluster.local:80
 
 No RBAC change goes with that -- Prometheus is not the Kubernetes API.
 {{- end }}

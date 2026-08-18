@@ -6,7 +6,8 @@ ServiceAccount and RBAC that decide what the agent is allowed to see.
 
 Three further read-only tools (`list_metrics`, `describe_metric`, `run_promql`)
 are backed by Prometheus rather than the Kubernetes API. They are registered
-only when `prometheus.url` is set — see [Metrics tools](#metrics-tools).
+only when `prometheus.url` is set, which the chart does by default — see
+[Metrics tools](#metrics-tools).
 
 This document covers deploying **this component only**. The agent and the
 host-side Ollama server are separate deliverables; see `../CLAUDE.md`.
@@ -184,7 +185,7 @@ environment variables. The ones that matter at deploy time:
 | `k8s.defaultNamespace` | `default` | Used when the model omits a namespace |
 | `limits.*` | see `values.yaml` | Result size caps: `maxBytes`, `listLimit`, log tail lines/bytes, request timeout, and the metrics/PromQL bounds |
 | `rbac.namespaces` | `[]` | Non-empty swaps the ClusterRole for per-namespace Roles |
-| `prometheus.url` | `""` (tools off) | Prometheus HTTP API root. Empty means the three metrics tools are not registered |
+| `prometheus.url` | `http://prometheus-server.observability.svc.cluster.local:80` | Prometheus HTTP API root. Empty means the three metrics tools are not registered |
 | `prometheus.timeout` | `15s` | Bounds one Prometheus call, and is sent to Prometheus as its own `timeout` |
 
 ### `k8s.allowedResources` drives two things at once
@@ -210,11 +211,16 @@ it takes a deliberate template edit and an explicit decision — not a `--set`.
 ### Metrics tools
 
 `list_metrics`, `describe_metric` and `run_promql` query Prometheus over its HTTP
-API. They are **not registered at all** unless `prometheus.url` is set:
+API. They are **not registered at all** unless `prometheus.url` is set. The chart
+ships it pointed at the lab's Prometheus, whose Service listens on port 80 rather
+than 9090:
 
 ```sh
-helm upgrade fathom-mcp ./helm \
-  --set prometheus.url=http://prometheus.observability.svc.cluster.local:9090
+# what values.yaml already sets
+--set prometheus.url=http://prometheus-server.observability.svc.cluster.local:80
+
+# elsewhere, or to turn the three tools off again
+--set prometheus.url=""
 ```
 
 The gate is deliberate. A tool that fails on every call is worse than an absent
@@ -294,8 +300,8 @@ problem from a connectivity one.
 `k8s.allowedResources` and upgrade; that fixes the allowlist and the RBAC
 together.
 
-**The metrics tools are missing from `tools/list`** — `prometheus.url` is empty,
-which is the default. The startup log line carries `prometheus_url` and
+**The metrics tools are missing from `tools/list`** — `prometheus.url` is empty.
+The startup log line carries `prometheus_url` and
 `metrics_tools` for exactly this: `kubectl -n fathom logs deploy/fathom-mcp | head -1`.
 Set the value and upgrade; the Deployment's `checksum/config` covers the
 `prometheus` block, so the pod rolls on its own.

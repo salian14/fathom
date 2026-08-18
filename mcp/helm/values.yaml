@@ -70,11 +70,12 @@ prometheus:
   # only the three Kubernetes tools rather than three tools that fail on every
   # call.
   #
-  # Set it once a Prometheus exists, e.g.
-  #   url: http://prometheus.observability.svc.cluster.local:9090
+  # This is the lab's prometheus-community/prometheus release in the
+  # observability namespace. Its Service listens on port 80, not the 9090 the
+  # binary itself uses, so the port is spelled out rather than left implicit.
   # No RBAC change goes with this. Prometheus is not the Kubernetes API, so the
   # ClusterRole and k8s.allowedResources are untouched.
-  url: ""
+  url: "http://prometheus-server.observability.svc.cluster.local:80"
   # Bounds one call into Prometheus. Sent to Prometheus as its own `timeout`
   # parameter as well as bounding the client, so the server stops evaluating a
   # query that nothing is waiting for any more.
