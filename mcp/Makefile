@@ -1,5 +1,6 @@
 BINARY      := fathom-mcp
-IMAGE       ?= fathom-mcp
+REGISTRY    ?= registry.lab:5000
+IMAGE       ?= $(REGISTRY)/$(BINARY)
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS     := -s -w -X main.version=$(VERSION)
 CHART       := helm
@@ -31,10 +32,15 @@ vet:
 image:
 	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(VERSION) .
 
+.PHONY: push
+push: image
+	docker push $(IMAGE):$(VERSION)
+
 .PHONY: lint-chart
 lint-chart:
-	@command -v helm >/dev/null 2>&1 || { echo "helm not installed, skipping chart lint"; exit 0; }
-	helm lint $(CHART)
+	@command -v helm >/dev/null 2>&1 || { echo "helm not installed, skipping chart lint"; exit 0; }; \
+	set -e; \
+	helm lint $(CHART); \
 	helm template fathom-mcp $(CHART) >/dev/null
 
 .PHONY: render-chart

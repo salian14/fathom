@@ -39,7 +39,7 @@ func ValidateNamespace(s string) error {
 
 func ValidateName(s string) error {
 	if s == "" {
-		return nil 
+		return nil
 	}
 	if errs := validation.IsDNS1123Subdomain(s); len(errs) > 0 {
 		return fmt.Errorf("invalid name %q: %s", s, strings.Join(errs, "; "))

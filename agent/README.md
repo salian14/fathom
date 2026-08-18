@@ -60,40 +60,73 @@ kubectl get nodes -o wide          # the nodes' INTERNAL-IP
 ip -brief addr show                # the host's address on that same network
 ```
 
-At the time of writing this lab's nodes are on `192.168.56.0/24` and the host is
-`192.168.56.1` — note that `ollama/config.env` still says `192.168.122.1`, which is
-a different (and currently down) libvirt bridge. Fixing that file is tracked
-separately; until then, take the address from `kubectl get nodes -o wide`.
+This lab's nodes are on `192.168.56.0/24` and the host is `192.168.56.1`, which is
+what `ollama/config.env` now says. Note that `192.168.122.1` — libvirt's *default*
+bridge, `virbr0` — is a different network that the nodes are not on, and it is an
+easy wrong answer because Ollama answers there too.
 
-The chart's default `ollama.service.externalName` is `localllm.lab`. **That name
-does not exist yet.** Adding it is a one-time host change, deliberately left out of
-this component:
+**The agent dials that IP directly.** `ollama.url` is `http://192.168.56.1:11434`,
+copied from what `setup.sh` prints, and no DNS is involved. The `ExternalName`
+Service still exists as a template but ships turned off
+(`ollama.service.create=false`).
+
+### Why not the ExternalName Service
+
+Worth knowing, because the Service is the obvious design and it is already written.
+
+An `ExternalName` Service is only a CNAME. `kubectl describe` showing no ClusterIP
+and no Endpoints is correct and is not a bug — a CNAME is all it ever produces.
+The real problem is that **CoreDNS cannot resolve `.lab`**, so the CNAME lands on
+nothing:
 
 ```sh
-# on the host, as root:
-echo "192.168.56.1 localllm.lab" >> /etc/hosts
-pkill -HUP dnsmasq     # libvirt's dnsmasq re-reads /etc/hosts only on SIGHUP
+# from the host, libvirt's dnsmasq answers fine:
+dig +short @192.168.56.1 localllm.lab       # -> registry.lab. -> 192.168.56.1
+
+# but CoreDNS does not (port-forward avoids needing a throwaway pod):
+kubectl -n kube-system port-forward deploy/coredns 15353:53 &
+dig +tcp @127.0.0.1 -p 15353 localllm.lab   # -> NXDOMAIN
+dig +tcp @127.0.0.1 -p 15353 github.com     # -> NOERROR, so upstream itself is fine
 ```
 
-That works because libvirt's dnsmasq serves the host's `/etc/hosts` to the VMs, and
-CoreDNS forwards to the node's resolver — so an entry on the host reaches pods.
-Verify it does, from inside the cluster rather than from your workstation:
+CoreDNS forwards to the node's `/run/systemd/resolve/resolv.conf`, and on these VMs
+that points at a public resolver, not at libvirt's dnsmasq. `registry.lab` looks like
+a counter-example, but it resolves only because it is in each VM's own `/etc/hosts`
+and **kubelet** resolves image references — CoreDNS never reads a node's hosts file,
+so no pod can resolve it. A pod that asks for the Service gets a CNAME with no A
+record, which surfaces in the agent log as:
 
-```sh
-kubectl run dnstest --rm -it --restart=Never --image=busybox \
-  -- nslookup localllm.lab
+```
+readiness check failed: ollama unreachable at http://fathom-ollama...: [Errno -2] Name or service not known
 ```
 
-Two escapes if you would rather not touch `/etc/hosts`:
+So adding `localllm.lab` to the host's `/etc/hosts` is necessary but not sufficient,
+and `--set ollama.service.externalName=registry.lab` does not help either — it fails
+at the same step. The only fix is a `.lab` stub zone in the `coredns` ConfigMap
+forwarding to the dnsmasq on the node network.
+
+**That was considered and rejected.** It is a hand-edit to shared `kube-system`
+state that a cluster rebuild silently drops, and it buys indirection this component
+does not need — one agent, one model, one address. Half-owning the cluster's DNS is
+a bigger commitment than the problem justifies. If the cluster ever grows a
+provisioned `.lab` zone of its own, flip `ollama.service.create` back to `true` and
+point `ollama.url` at `fathom-ollama.fathom.svc.cluster.local`; the template is
+still there.
+
+The trade accepted instead: the address appears in `ollama/config.env` and in
+`values.yaml`. `setup.sh` prints the exact `ollama.url` line to copy, so the second
+one is transcription rather than a second decision.
+
+### Verifying
+
+`kubectl describe svc fathom-ollama` is not a useful check even when the Service is
+enabled — an `ExternalName` Service has no ClusterIP and no Endpoints by design,
+whether or not DNS works. Check that the agent can actually reach the host:
 
 ```sh
-# 1. reuse a name that already resolves to the host on the node network
-helm install fathom-agent ./helm --set ollama.service.externalName=registry.lab
-
-# 2. skip the Service entirely and dial the host's address
-helm install fathom-agent ./helm \
-  --set ollama.service.create=false \
-  --set ollama.url=http://192.168.56.1:11434
+kubectl -n fathom exec deploy/fathom-agent -- \
+  python3 -c "import urllib.request;print(urllib.request.urlopen('http://192.168.56.1:11434/api/version',timeout=5).read())"
+kubectl -n fathom get pods -l app.kubernetes.io/name=fathom-agent   # want 1/1
 ```
 
 ## 1. Build and push the image
@@ -133,10 +166,22 @@ helm install fathom-agent ./helm --dry-run
 
 ```sh
 kubectl -n fathom rollout status deploy/fathom-agent
-kubectl -n fathom port-forward svc/fathom-agent 8081:8080 &
 
-curl -s localhost:8081/healthz   # process is up
-curl -s localhost:8081/readyz    # process is up AND both dependencies answered
+# The Service is a NodePort on 30080, and the nodes share the 192.168.56.0/24
+# libvirt network with this workstation, so no tunnel is needed.
+export FATHOM=http://192.168.56.10:30080
+
+curl -s $FATHOM/healthz   # process is up
+curl -s $FATHOM/readyz    # process is up AND both dependencies answered
+```
+
+Any node's IP works — `kube-proxy` forwards the port from every node regardless of
+where the pod landed, so `192.168.56.11` and `.12` are equally valid. If you would
+rather not expose it, set `service.type=ClusterIP` and tunnel instead:
+
+```sh
+kubectl -n fathom port-forward svc/fathom-agent 8081:8080 &
+export FATHOM=http://localhost:8081
 ```
 
 `/readyz` is the one worth trusting: it returns 200 only when Ollama answered
@@ -147,7 +192,7 @@ is down" without reading logs.
 Then ask it something:
 
 ```sh
-curl -s localhost:8081/chat -H 'content-type: application/json' \
+curl -s $FATHOM/chat -H 'content-type: application/json' \
   -d '{"question":"Is the fathom-mcp deployment healthy? Check its events and recent logs."}'
 ```
 
@@ -208,10 +253,12 @@ environment variables, the same pattern the MCP server uses.
 | `namespace.name` / `namespace.create` | `fathom` / `false` | Where the workload lives; creation is off because the MCP chart owns it |
 | `image.repository` / `image.tag` | `registry.lab:5000/fathom-agent` / chart appVersion | Image coordinates |
 | `service.port` | `8080` | Container port, Service port, and the listen address |
+| `service.type` | `NodePort` | `NodePort` so the host can query the agent directly; `ClusterIP` if you prefer a port-forward |
+| `service.nodePort` | `30080` | Pinned so the URL survives a reinstall. Ignored unless `service.type` is `NodePort`; null lets the API server assign one |
 | `mcp.url` | `http://fathom-mcp.fathom.svc.cluster.local:8080/mcp` | The MCP endpoint, path included |
-| `ollama.url` | `http://fathom-ollama.fathom.svc.cluster.local:11434` | Dialled through the ExternalName Service |
+| `ollama.url` | `http://192.168.56.1:11434` | The host, dialled directly. Copy from `setup.sh` output |
 | `ollama.model` | `fathom-agent` | The **alias**, not the base model tag |
-| `ollama.service.create` / `.name` / `.externalName` | `true` / `fathom-ollama` / `localllm.lab` | The ExternalName Service |
+| `ollama.service.create` / `.name` / `.externalName` | `false` / `fathom-ollama` / `localllm.lab` | The ExternalName Service, off — see [Why not the ExternalName Service](#why-not-the-externalname-service) |
 | `agent.maxIterations` | `8` | Tool-calling rounds per turn |
 | `agent.maxToolChars` | `8000` | Per-tool-result cap before it reaches the model |
 | `agent.requestTimeout` | `180s` | Whole-turn budget |
