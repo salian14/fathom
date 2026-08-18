@@ -50,6 +50,35 @@ limits:
   logMaxTailLines: 2000
   logMaxBytes: 32768
   requestTimeout: 30s
+  # Bounds for the Prometheus-backed tools. Ignored entirely when
+  # prometheus.url is empty, because the tools are not registered then.
+  #
+  # metricsSeriesLimit does double duty: it caps the series describe_metric
+  # inspects, and it is the point past which cardinality is reported as
+  # ">= N" rather than exactly -- which is itself the useful answer to
+  # "is this metric expensive to query".
+  metricsListLimit: 500
+  metricsSeriesLimit: 500
+  metricsLabelValues: 50
+  promqlMaxSeries: 100
+  promqlMaxQueryLength: 2048
+
+prometheus:
+  # Root of the Prometheus HTTP API. Empty is a working configuration and the
+  # default: with no URL there is no Prometheus client, and list_metrics,
+  # describe_metric and run_promql are never registered. The model then sees
+  # only the three Kubernetes tools rather than three tools that fail on every
+  # call.
+  #
+  # Set it once a Prometheus exists, e.g.
+  #   url: http://prometheus.observability.svc.cluster.local:9090
+  # No RBAC change goes with this. Prometheus is not the Kubernetes API, so the
+  # ClusterRole and k8s.allowedResources are untouched.
+  url: ""
+  # Bounds one call into Prometheus. Sent to Prometheus as its own `timeout`
+  # parameter as well as bounding the client, so the server stops evaluating a
+  # query that nothing is waiting for any more.
+  timeout: 15s
 
 server:
   transport: http

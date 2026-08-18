@@ -8,7 +8,22 @@ The agent reaches it in-cluster at:
 Put that endpoint in the agent chart's values -- it is the MCP server URL, not
 the Ollama URL, which still points at the host outside the cluster.
 
-Tools exposed: k8s_get, k8s_describe, k8s_log. All read-only.
+Tools exposed: k8s_get, k8s_describe, k8s_log{{ if .Values.prometheus.url }},
+list_metrics, describe_metric, run_promql{{ end }}. All read-only.
+
+{{ if .Values.prometheus.url -}}
+The metrics tools query Prometheus at {{ .Values.prometheus.url }}. That endpoint
+is not checked at install time and is not part of the readiness probe -- the
+Kubernetes tools keep working if Prometheus is down.
+{{- else -}}
+The metrics tools (list_metrics, describe_metric, run_promql) are NOT registered:
+prometheus.url is empty. Set it to register them, e.g.
+
+  helm upgrade fathom-mcp ./helm \
+    --set prometheus.url=http://prometheus.observability.svc.cluster.local:9090
+
+No RBAC change goes with that -- Prometheus is not the Kubernetes API.
+{{- end }}
 
 Readable resource types ({{ len .Values.k8s.allowedResources }}):
 {{- range .Values.k8s.allowedResources }}

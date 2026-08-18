@@ -14,7 +14,7 @@ driving a host-side Ollama model to answer questions about that cluster using re
 
 - **`agent/`** — Python 3.12, FastAPI + LangGraph. Owns the agent loop and the `POST /chat` API.
   Holds no Kubernetes credentials at all.
-- **`mcp/`** — Go, an MCP server over streamable HTTP. Owns the three read-only tools and the only
+- **`mcp/`** — Go, an MCP server over streamable HTTP. Owns every read-only tool and the only
   service account that can read the cluster.
 
 The split matters: the agent pod runs with `automountServiceAccountToken: false` and no RBAC, so
@@ -48,9 +48,24 @@ corresponding `get`/`list` rule.
 
 ## Scope
 
-Tools are limited to exactly three, all read-only: `k8s_get`, `k8s_describe`, `k8s_log`. Do not add
-write/mutate tools, and do not widen the RBAC beyond read verbs, without an explicit decision from
-the user — the read-only boundary is a safety property, not an accident of incomplete work.
+Six tools, all read-only, in two groups:
+
+- **Kubernetes**, always registered: `k8s_get`, `k8s_describe`, `k8s_log`. Backed by client-go
+  against the API server, scoped by the ClusterRole in `mcp/helm`.
+- **Prometheus**, registered only when `prometheus.url` is set: `list_metrics`,
+  `describe_metric`, `run_promql`. Backed by the Prometheus HTTP API — a different backend
+  entirely, with no Kubernetes credentials involved and no RBAC attached.
+
+The gate is the point of the second group: with no URL there is no Prometheus client and those
+three tools are absent from `tools/list`, because a tool that fails on every call is worse than
+one that is not there — the model spends turns discovering it. Adding the URL is a values change
+and a rollout, never a code change.
+
+Do not add write/mutate tools, and do not widen the RBAC beyond read verbs, without an explicit
+decision from the user — the read-only boundary is a safety property, not an accident of
+incomplete work. That boundary holds on the Prometheus side by construction: the four endpoints
+used (`/api/v1/query`, `/api/v1/series`, `/api/v1/metadata`, `/api/v1/label/__name__/values`)
+only read the TSDB, and `run_promql` is instant-query only.
 
 ## Layout
 
@@ -83,7 +98,10 @@ transport carries JSON-RPC there.
 Two rules when touching this:
 
 - **Adding a boundary means instrumenting it.** Prefer the auto-instrumentation libraries over
-  hand-rolled spans; reach for a manual span only where no instrumentor can see the seam.
+  hand-rolled spans; reach for a manual span only where no instrumentor can see the seam. There
+  are three such boundaries in `fathom-mcp`: inbound MCP, the Kubernetes API, and — when
+  configured — Prometheus. Each is instrumented by wrapping its transport once at construction,
+  never per call.
 - **Probes are excluded, not sampled.** `/healthz` and `/readyz` produce no spans on either side.
   The agent suppresses instrumentation around its dependency checks and opens their MCP session
   without a span; `fathom-mcp` in turn drops inbound requests that carry no trace context, since
@@ -91,8 +109,12 @@ Two rules when touching this:
   so a propagation failure surfaces as root spans rather than silence. Verified end to end: a
   probe cycle emits zero spans, a real `/chat` emits one trace across both services.
 
-Metric labels must stay low-cardinality: resource kinds, tool names, and error classes are safe;
-object names, selectors, session ids, and question text are span attributes only.
+Metric labels must stay low-cardinality: resource kinds, tool names, error classes, and Prometheus
+endpoint kinds (`query`, `series`, `metadata`, `label_values`) are safe; object names, selectors,
+session ids, question text, **metric names and PromQL queries** are span attributes only. The
+Prometheus failure path classifies onto the same seven error classes as the Kubernetes one rather
+than inventing a parallel vocabulary — both feed `mcp.tool.errors`, and two vocabularies would
+split one stream into two that cannot be compared.
 
 **Python dependency changes are a two-step.** `agent/Dockerfile` installs `requirements.lock` and
 then `pip install --no-deps .`, so the lock is the only source of what lands in the image. After

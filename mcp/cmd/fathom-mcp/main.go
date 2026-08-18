@@ -17,6 +17,7 @@ import (
 
 	"github.com/spellbound/fathom/mcp/internal/config"
 	"github.com/spellbound/fathom/mcp/internal/kube"
+	"github.com/spellbound/fathom/mcp/internal/prom"
 	"github.com/spellbound/fathom/mcp/internal/telemetry"
 	"github.com/spellbound/fathom/mcp/internal/tools"
 )
@@ -71,15 +72,28 @@ func run() error {
 		return err
 	}
 
+	// Built only when a URL is configured. A nil client is the signal that the
+	// metrics tools are not registered, so nothing downstream has to check.
+	var promClient *prom.Client
+	if cfg.MetricsEnabled() {
+		promClient, err = prom.New(prom.Options{
+			BaseURL:   cfg.PrometheusURL,
+			Timeout:   cfg.PrometheusTimeout,
+			UserAgent: "fathom-mcp/" + version,
+			Trace:     cfg.Telemetry != "off",
+		})
+		if err != nil {
+			return err
+		}
+	}
+
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    "fathom-mcp",
 		Version: version,
 	}, &mcp.ServerOptions{
-		Instructions: "Read-only access to a Kubernetes cluster. Survey with k8s_get, " +
-			"diagnose a specific object with k8s_describe, and read container output with " +
-			"k8s_log. Nothing here can change the cluster.",
+		Instructions: instructions(cfg.MetricsEnabled()),
 	})
-	tools.New(cfg, client, log).Register(srv)
+	tools.New(cfg, client, promClient, log).Register(srv)
 
 	// Protocol-level spans, which is where the agent's traceparent is actually
 	// reachable -- see telemetry.Receiving. Registered for both transports.
@@ -89,16 +103,36 @@ func run() error {
 	}
 	srv.AddReceivingMiddleware(mw)
 
+	// prometheus_url is logged even when empty: "the metrics tools are missing"
+	// is otherwise diagnosed by elimination, and this turns it into line one.
 	log.Info("starting",
 		"version", version,
 		"transport", cfg.Transport,
 		"allowed_resources", cfg.AllowedResources,
-		"allowed_namespaces", cfg.AllowedNamespaces)
+		"allowed_namespaces", cfg.AllowedNamespaces,
+		"prometheus_url", cfg.PrometheusURL,
+		"metrics_tools", cfg.MetricsEnabled())
 
 	if cfg.Transport == "stdio" {
 		return srv.Run(ctx, &mcp.StdioTransport{})
 	}
 	return serveHTTP(ctx, cfg, srv, client, log)
+}
+
+// instructions is the server's own preamble, which the model reads before any
+// tool description. It has to match what is actually registered -- describing
+// metrics tools on a deployment that has none would send the model looking for
+// tools that are not there.
+func instructions(metrics bool) string {
+	base := "Read-only access to a Kubernetes cluster. Survey with k8s_get, " +
+		"diagnose a specific object with k8s_describe, and read container output with " +
+		"k8s_log."
+	if metrics {
+		base += " For how the cluster is behaving over time rather than how it is " +
+			"configured, use list_metrics to find a metric, describe_metric to learn its " +
+			"labels, then run_promql to query it."
+	}
+	return base + " Nothing here can change the cluster."
 }
 
 func serveHTTP(ctx context.Context, cfg *config.Config, srv *mcp.Server, client *kube.Client, log *slog.Logger) error {

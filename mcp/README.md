@@ -1,8 +1,12 @@
 # Deploying fathom-mcp
 
-`fathom-mcp` is the MCP tool server: it exposes three read-only Kubernetes tools
+`fathom-mcp` is the MCP tool server. It exposes three read-only Kubernetes tools
 (`k8s_get`, `k8s_describe`, `k8s_log`) over streamable HTTP, and it ships the
 ServiceAccount and RBAC that decide what the agent is allowed to see.
+
+Three further read-only tools (`list_metrics`, `describe_metric`, `run_promql`)
+are backed by Prometheus rather than the Kubernetes API. They are registered
+only when `prometheus.url` is set — see [Metrics tools](#metrics-tools).
 
 This document covers deploying **this component only**. The agent and the
 host-side Ollama server are separate deliverables; see `../CLAUDE.md`.
@@ -178,8 +182,10 @@ environment variables. The ones that matter at deploy time:
 | `k8s.allowedResources` | 18 types | Both the tool allowlist **and** the RBAC rules |
 | `k8s.allowedNamespaces` | `[]` (any) | Server-side namespace restriction, applied before the API call |
 | `k8s.defaultNamespace` | `default` | Used when the model omits a namespace |
-| `limits.*` | see `values.yaml` | Result size caps: `maxBytes`, `listLimit`, log tail lines/bytes, request timeout |
+| `limits.*` | see `values.yaml` | Result size caps: `maxBytes`, `listLimit`, log tail lines/bytes, request timeout, and the metrics/PromQL bounds |
 | `rbac.namespaces` | `[]` | Non-empty swaps the ClusterRole for per-namespace Roles |
+| `prometheus.url` | `""` (tools off) | Prometheus HTTP API root. Empty means the three metrics tools are not registered |
+| `prometheus.timeout` | `15s` | Bounds one Prometheus call, and is sent to Prometheus as its own `timeout` |
 
 ### `k8s.allowedResources` drives two things at once
 
@@ -200,6 +206,42 @@ Entries are `resource` or `resource.group`, lowercase, no slashes.
 Verbs are hardcoded to `get` and `list` in `helm/templates/_helpers.tpl` and are
 not parameterised. Widening past read verbs ends the Phase 1 safety property, so
 it takes a deliberate template edit and an explicit decision — not a `--set`.
+
+### Metrics tools
+
+`list_metrics`, `describe_metric` and `run_promql` query Prometheus over its HTTP
+API. They are **not registered at all** unless `prometheus.url` is set:
+
+```sh
+helm upgrade fathom-mcp ./helm \
+  --set prometheus.url=http://prometheus.observability.svc.cluster.local:9090
+```
+
+The gate is deliberate. A tool that fails on every call is worse than an absent
+one — the model has to spend a turn discovering it, and the failure reads to it
+like a cluster problem rather than a deployment choice. With no URL the model
+simply sees three tools instead of six.
+
+Some consequences worth knowing:
+
+- **No RBAC change goes with this.** Prometheus is not the Kubernetes API, so
+  `k8s.allowedResources` and the ClusterRole are untouched and the read-only
+  boundary is unaffected. What the tools can see is whatever that Prometheus
+  scraped, which is a separate question from what the ServiceAccount can read.
+- **Prometheus is not in the readiness probe.** `/readyz` covers the Kubernetes
+  API only, so a Prometheus outage degrades the metrics tools and leaves the
+  rest of the server serving. Turning a metrics outage into a total outage would
+  be the wrong trade.
+- **`run_promql` is instant-query only** (`/api/v1/query`). Rates and rollups
+  still work inside a single query — `rate(x[5m])` — but there is no
+  `query_range`, so nothing returns a time series to plot.
+- **Results are bounded twice**: `limits.promqlMaxSeries` caps series before
+  `limits.maxBytes` caps bytes, and both announce themselves in the output so
+  the model does not read a truncated answer as a complete one.
+
+Invalid PromQL comes back as Prometheus's own positioned parse error
+(`parse error at char 8: unexpected ")"`) rather than a generic refusal — that
+is what lets the model correct its own query on the next turn.
 
 ### Restricting scope
 
@@ -252,6 +294,22 @@ problem from a connectivity one.
 `k8s.allowedResources` and upgrade; that fixes the allowlist and the RBAC
 together.
 
+**The metrics tools are missing from `tools/list`** — `prometheus.url` is empty,
+which is the default. The startup log line carries `prometheus_url` and
+`metrics_tools` for exactly this: `kubectl -n fathom logs deploy/fathom-mcp | head -1`.
+Set the value and upgrade; the Deployment's `checksum/config` covers the
+`prometheus` block, so the pod rolls on its own.
+
+**Metrics tools all fail with a connection error** — the URL is set but wrong or
+unreachable from the `fathom` namespace. The pod is still `Ready`, because
+Prometheus is deliberately not part of the readiness probe. Check it from inside
+the cluster rather than from your laptop:
+
+```sh
+kubectl -n fathom exec deploy/fathom-mcp -- \
+  wget -qO- "$FATHOM_MCP_PROMETHEUS_URL/-/healthy"
+```
+
 **Pod will not start at all** — config validation is fail-fast, and the error
 names the offending variable (e.g. `FATHOM_MCP_LOG_TAIL_LINES (500) exceeds
 FATHOM_MCP_LOG_MAX_TAIL_LINES (200)`). Read the first line of the logs.
@@ -278,7 +336,12 @@ confirm it with `ip -brief addr show` if the network is ever rebuilt.
 ## Telemetry
 
 Traces and metrics go to the otel-collector in the `observability` namespace over
-OTLP/gRPC. `FATHOM_MCP_TELEMETRY` selects the exporter — `otlp` (default),
+OTLP/gRPC. Three outbound and inbound boundaries are instrumented — inbound MCP,
+the Kubernetes API, and Prometheus when configured — each by wrapping its
+transport once at construction rather than per call. Metric names and PromQL
+queries are span attributes only; the error metric's dimensions are the
+endpoint kind (`query`, `series`, `metadata`, `label_values`), which is a closed
+set. `FATHOM_MCP_TELEMETRY` selects the exporter — `otlp` (default),
 `console`, or `off` — and everything else is configured through the standard
 `OTEL_*` variables, which the SDK reads directly.
 

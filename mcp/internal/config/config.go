@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -62,6 +63,36 @@ type Config struct {
 	// RequestTimeout bounds a single call into the Kubernetes API.
 	RequestTimeout time.Duration
 
+	// PrometheusURL is the root of the Prometheus HTTP API, e.g.
+	// "http://prometheus.observability.svc.cluster.local:9090".
+	//
+	// Empty is the meaningful default: with no URL there is no Prometheus
+	// client and the three metrics tools are never registered, so a
+	// deployment without a metrics backend advertises only the Kubernetes
+	// tools rather than advertising tools that would always fail.
+	PrometheusURL string
+
+	// PrometheusTimeout bounds a single call into Prometheus. Separate from
+	// RequestTimeout because it is a different backend with a different
+	// failure profile -- a PromQL evaluation can be slow for reasons a
+	// Kubernetes read never is.
+	PrometheusTimeout time.Duration
+
+	// Metrics tool bounds.
+	//
+	// MetricsListLimit caps the metric names list_metrics returns.
+	// MetricsSeriesLimit caps the series describe_metric inspects, and doubles
+	// as the point past which cardinality is reported as ">=" rather than
+	// exactly. MetricsLabelValues caps the distinct values shown per label.
+	MetricsListLimit   int
+	MetricsSeriesLimit int
+	MetricsLabelValues int
+
+	// PromQL bounds. MaxSeries caps the elements rendered from a query result;
+	// MaxQueryLength refuses an oversized expression before it is sent.
+	PromQLMaxSeries      int
+	PromQLMaxQueryLength int
+
 	// LogLevel for the server's own structured logs.
 	LogLevel slog.Level
 
@@ -109,6 +140,7 @@ func Load() (*Config, error) {
 		AllowedNamespaces: csv(env("ALLOWED_NAMESPACES", "")),
 		DefaultNamespace:  env("DEFAULT_NAMESPACE", "default"),
 		Telemetry:         env("TELEMETRY", "otlp"),
+		PrometheusURL:     strings.TrimSpace(env("PROMETHEUS_URL", "")),
 	}
 
 	var err error
@@ -131,6 +163,24 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.LogLevel, err = envLevel("LOG_LEVEL", slog.LevelInfo); err != nil {
+		return nil, err
+	}
+	if c.PrometheusTimeout, err = envDuration("PROMETHEUS_TIMEOUT", 15*time.Second); err != nil {
+		return nil, err
+	}
+	if c.MetricsListLimit, err = envInt("METRICS_LIST_LIMIT", 500); err != nil {
+		return nil, err
+	}
+	if c.MetricsSeriesLimit, err = envInt("METRICS_SERIES_LIMIT", 500); err != nil {
+		return nil, err
+	}
+	if c.MetricsLabelValues, err = envInt("METRICS_LABEL_VALUES", 50); err != nil {
+		return nil, err
+	}
+	if c.PromQLMaxSeries, err = envInt("PROMQL_MAX_SERIES", 100); err != nil {
+		return nil, err
+	}
+	if c.PromQLMaxQueryLength, err = envInt("PROMQL_MAX_QUERY_LENGTH", 2048); err != nil {
 		return nil, err
 	}
 
@@ -177,6 +227,39 @@ func (c *Config) validate() error {
 	if c.RequestTimeout <= 0 {
 		return fmt.Errorf("%sREQUEST_TIMEOUT must be > 0, got %s", envPrefix, c.RequestTimeout)
 	}
+	// An unset URL is valid and means "metrics tools disabled". A set but
+	// unusable one is a deploy mistake, and failing fast here is what turns it
+	// into a named error in the first line of the pod's logs rather than a
+	// tool that errors on every call.
+	if c.PrometheusURL != "" {
+		u, err := url.Parse(c.PrometheusURL)
+		switch {
+		case err != nil:
+			return fmt.Errorf("%sPROMETHEUS_URL: %w", envPrefix, err)
+		case u.Scheme != "http" && u.Scheme != "https":
+			return fmt.Errorf("%sPROMETHEUS_URL: want an http:// or https:// URL, got %q",
+				envPrefix, c.PrometheusURL)
+		case u.Host == "":
+			return fmt.Errorf("%sPROMETHEUS_URL: %q has no host", envPrefix, c.PrometheusURL)
+		}
+	}
+	if c.PrometheusTimeout <= 0 {
+		return fmt.Errorf("%sPROMETHEUS_TIMEOUT must be > 0, got %s", envPrefix, c.PrometheusTimeout)
+	}
+	for _, b := range []struct {
+		name  string
+		value int
+	}{
+		{"METRICS_LIST_LIMIT", c.MetricsListLimit},
+		{"METRICS_SERIES_LIMIT", c.MetricsSeriesLimit},
+		{"METRICS_LABEL_VALUES", c.MetricsLabelValues},
+		{"PROMQL_MAX_SERIES", c.PromQLMaxSeries},
+		{"PROMQL_MAX_QUERY_LENGTH", c.PromQLMaxQueryLength},
+	} {
+		if b.value <= 0 {
+			return fmt.Errorf("%s%s must be > 0, got %d", envPrefix, b.name, b.value)
+		}
+	}
 	switch c.Telemetry {
 	case "otlp", "console", "off":
 	default:
@@ -206,6 +289,10 @@ func (c *Config) AllowsResource(key string) bool {
 	}
 	return false
 }
+
+// MetricsEnabled reports whether a Prometheus backend is configured, and so
+// whether list_metrics, describe_metric and run_promql are registered at all.
+func (c *Config) MetricsEnabled() bool { return c.PrometheusURL != "" }
 
 func env(name, def string) string {
 	if v, ok := os.LookupEnv(envPrefix + name); ok {

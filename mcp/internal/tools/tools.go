@@ -15,6 +15,7 @@ import (
 
 	"github.com/spellbound/fathom/mcp/internal/config"
 	"github.com/spellbound/fathom/mcp/internal/kube"
+	"github.com/spellbound/fathom/mcp/internal/prom"
 )
 
 type Server struct {
@@ -22,13 +23,17 @@ type Server struct {
 	client *kube.Client
 	log    *slog.Logger
 
+	// Nil unless a Prometheus URL is configured. When it is nil the three
+	// metrics tools are not registered, so no handler can reach a nil client.
+	prom *prom.Client
+
 	// Nil when the meter could not build it; every use is guarded. A missing
 	// counter is not a reason to fail a tool call.
 	errors metric.Int64Counter
 }
 
-func New(cfg *config.Config, client *kube.Client, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, client: client, log: log}
+func New(cfg *config.Config, client *kube.Client, promClient *prom.Client, log *slog.Logger) *Server {
+	s := &Server{cfg: cfg, client: client, prom: promClient, log: log}
 
 	// Resolved from the global meter, which is a no-op until telemetry.Setup
 	// installs a real one. That makes this safe to call from tests too.
@@ -45,20 +50,34 @@ func New(cfg *config.Config, client *kube.Client, log *slog.Logger) *Server {
 // failed records a failed Kubernetes read on the active span, the metric
 // stream and the log, then hands back the model-facing error.
 //
-// It exists so the three handlers classify errors identically, and so the
+// It exists so the handlers classify errors identically, and so the
 // classification happens while the typed error is still intact -- apiError
 // rewrites it into prose one call later, after which "was this a 403 or a
 // 404" is no longer answerable.
 func (s *Server) failed(ctx context.Context, tool, resource string, err error) {
-	class := ErrorClass(err)
+	s.record(ctx, "kubernetes read failed", tool, resource, ErrorClass(err), err)
+}
 
+// promFailed is failed's counterpart for the Prometheus backend. The dimension
+// in the resource slot is the API endpoint kind -- query, series, metadata,
+// label_values -- never the metric name or the query text, both of which are
+// unbounded and belong on the span.
+func (s *Server) promFailed(ctx context.Context, tool, endpoint string, err error) {
+	s.record(ctx, "prometheus read failed", tool, endpoint, PromErrorClass(err), err)
+}
+
+// record is the shared body: span, metric, log. Callers classify first,
+// because only they still hold the typed error.
+func (s *Server) record(ctx context.Context, msg, tool, resource, class string, err error) {
 	span := trace.SpanFromContext(ctx)
 	span.SetAttributes(attribute.String("error.type", class))
 	span.RecordError(err)
 
 	if s.errors != nil {
-		// tool and class are both closed sets; resource is allowlisted to 18
-		// values. No object names here -- those stay on the span.
+		// tool and class are both closed sets; resource is either an
+		// allowlisted Kubernetes kind or one of four Prometheus endpoint
+		// names. No object names, metric names or queries here -- those stay
+		// on the span.
 		s.errors.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("tool", tool),
 			attribute.String("resource", resource),
@@ -66,7 +85,7 @@ func (s *Server) failed(ctx context.Context, tool, resource string, err error) {
 		))
 	}
 
-	s.log.WarnContext(ctx, "kubernetes read failed",
+	s.log.WarnContext(ctx, msg,
 		"tool", tool, "resource", resource, "error_class", class, "error", err)
 }
 
@@ -95,6 +114,14 @@ func (s *Server) Register(srv *mcp.Server) {
 			"to read the log of the last terminated container after a restart. Read-only.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, Title: "Read pod logs"},
 	}, s.handleLog)
+
+	// The metrics tools exist only when there is a Prometheus to answer them.
+	// Registering them unconditionally would put three tools in front of the
+	// model that fail on every call, and a tool that always fails is worse
+	// than an absent one -- the model spends turns discovering it.
+	if s.cfg.MetricsEnabled() {
+		s.registerMetrics(srv)
+	}
 }
 
 func text(s string) *mcp.CallToolResult {

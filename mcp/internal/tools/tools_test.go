@@ -16,9 +16,10 @@ import (
 )
 
 func testServer(cfg *config.Config) *Server {
-	// The Kubernetes client is nil: everything exercised here decides whether a
-	// request is permissible before any client call would happen.
-	return New(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// Both clients are nil: everything exercised here decides whether a
+	// request is permissible, or which tools are registered, before any client
+	// call would happen.
+	return New(cfg, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func restMapping(resource string, namespaced bool) *meta.RESTMapping {
@@ -35,11 +36,45 @@ func restMapping(resource string, namespaced bool) *meta.RESTMapping {
 // The tool list is the entire prompt surface the model sees. If a tool goes
 // missing or an argument is renamed, the agent silently loses a capability, so
 // pin the contract.
+//
+// Both halves are pinned, because the metrics tools are conditional: the
+// without-Prometheus case is what protects a deployment that has no metrics
+// backend from being shown three tools that would fail on every call, and it
+// is the case that regresses silently if the gate is ever removed.
 func TestRegisteredToolContract(t *testing.T) {
+	kubeTools := map[string][]string{
+		"k8s_get":      {"resource", "namespace", "name", "allNamespaces", "labelSelector"},
+		"k8s_describe": {"resource", "name", "namespace"},
+		"k8s_log":      {"name", "namespace", "container", "tailLines", "previous"},
+	}
+	metricsTools := map[string][]string{
+		"list_metrics":    {"contains", "match", "limit"},
+		"describe_metric": {"metric", "match"},
+		"run_promql":      {"query", "time"},
+	}
+
+	t.Run("without prometheus", func(t *testing.T) {
+		assertToolContract(t, &config.Config{}, kubeTools)
+	})
+
+	t.Run("with prometheus", func(t *testing.T) {
+		want := map[string][]string{}
+		for name, props := range kubeTools {
+			want[name] = props
+		}
+		for name, props := range metricsTools {
+			want[name] = props
+		}
+		assertToolContract(t, &config.Config{PrometheusURL: "http://prometheus.test:9090"}, want)
+	})
+}
+
+func assertToolContract(t *testing.T, cfg *config.Config, want map[string][]string) {
+	t.Helper()
 	ctx := context.Background()
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "v0"}, nil)
-	testServer(&config.Config{}).Register(srv)
+	testServer(cfg).Register(srv)
 
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 	if _, err := srv.Connect(ctx, serverTransport, nil); err != nil {
@@ -60,11 +95,6 @@ func TestRegisteredToolContract(t *testing.T) {
 		found[tool.Name] = tool
 	}
 
-	want := map[string][]string{
-		"k8s_get":      {"resource", "namespace", "name", "allNamespaces", "labelSelector"},
-		"k8s_describe": {"resource", "name", "namespace"},
-		"k8s_log":      {"name", "namespace", "container", "tailLines", "previous"},
-	}
 	if len(found) != len(want) {
 		t.Fatalf("registered %d tools (%v), want exactly %d", len(found), keys(found), len(want))
 	}

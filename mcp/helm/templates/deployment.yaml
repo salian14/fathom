@@ -23,7 +23,7 @@ spec:
           change to it edits the Deployment without restarting the pod that is
           meant to pick it up. server, limits and otel were all missing.
         */}}
-        checksum/config: {{ printf "%s%s%s%s" (toYaml .Values.k8s) (toYaml .Values.server) (toYaml .Values.limits) (toYaml .Values.otel) | sha256sum }}
+        checksum/config: {{ printf "%s%s%s%s%s" (toYaml .Values.k8s) (toYaml .Values.server) (toYaml .Values.limits) (toYaml .Values.otel) (toYaml .Values.prometheus) | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -73,6 +73,27 @@ spec:
               value: {{ .Values.limits.logMaxBytes | quote }}
             - name: FATHOM_MCP_REQUEST_TIMEOUT
               value: {{ .Values.limits.requestTimeout | quote }}
+            {{- /*
+              The metrics tools are registered only when a URL is present, so
+              the whole block is conditional: an empty prometheus.url must
+              leave FATHOM_MCP_PROMETHEUS_URL unset rather than set to "".
+            */}}
+            {{- if .Values.prometheus.url }}
+            - name: FATHOM_MCP_PROMETHEUS_URL
+              value: {{ .Values.prometheus.url | quote }}
+            - name: FATHOM_MCP_PROMETHEUS_TIMEOUT
+              value: {{ .Values.prometheus.timeout | quote }}
+            - name: FATHOM_MCP_METRICS_LIST_LIMIT
+              value: {{ .Values.limits.metricsListLimit | quote }}
+            - name: FATHOM_MCP_METRICS_SERIES_LIMIT
+              value: {{ .Values.limits.metricsSeriesLimit | quote }}
+            - name: FATHOM_MCP_METRICS_LABEL_VALUES
+              value: {{ .Values.limits.metricsLabelValues | quote }}
+            - name: FATHOM_MCP_PROMQL_MAX_SERIES
+              value: {{ .Values.limits.promqlMaxSeries | quote }}
+            - name: FATHOM_MCP_PROMQL_MAX_QUERY_LENGTH
+              value: {{ .Values.limits.promqlMaxQueryLength | quote }}
+            {{- end }}
             {{- /*
               Declared before OTEL_RESOURCE_ATTRIBUTES because the kubelet only
               expands $(VAR) references to variables defined earlier in this

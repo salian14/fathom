@@ -1,6 +1,9 @@
 package tools
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The resource argument becomes part of a discovery lookup and, once resolved,
 // part of a URL path. These cases are the ones that would matter if the model
@@ -77,5 +80,68 @@ func TestValidateSelectors(t *testing.T) {
 	}
 	if err := ValidateFieldSelector("status.phase"); err == nil {
 		t.Error("malformed fieldSelector accepted")
+	}
+}
+
+func TestValidateMetricName(t *testing.T) {
+	// Colons are legal in Prometheus names (they mark recording rules) and
+	// dashes are not -- the opposite of the Kubernetes rules above, which is
+	// exactly why this needs its own validator.
+	for _, s := range []string{"up", "node_cpu_seconds_total", "job:rate5m", "_internal", "X1"} {
+		if err := ValidateMetricName(s); err != nil {
+			t.Errorf("ValidateMetricName(%q) = %v, want nil", s, err)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"1up",                 // must not start with a digit
+		"node-cpu",            // dash
+		"up{job=\"x\"}",       // a selector, not a name
+		"up or vector(1)",     // an expression, not a name
+		"../../etc",           // path traversal
+		"up\nnode_cpu",        // newline
+		"up&query=drop",       // query injection
+		"metric with a space", //
+		"überflüssig",         // non-ASCII
+	}
+	for _, s := range invalid {
+		if err := ValidateMetricName(s); err == nil {
+			t.Errorf("ValidateMetricName(%q) = nil, want error", s)
+		}
+	}
+}
+
+func TestValidateSelector(t *testing.T) {
+	// Braces are optional on the way in and always absent on the way out, so
+	// callers can splice the result into a selector of their own.
+	tests := []struct{ in, want string }{
+		{"", ""},
+		{`job="kubelet"`, `job="kubelet"`},
+		{`{job="kubelet"}`, `job="kubelet"`},
+		{`  {job="kubelet",ns!="x"}  `, `job="kubelet",ns!="x"`},
+		{`{}`, ""},
+	}
+	for _, tt := range tests {
+		got, err := ValidateSelector(tt.in)
+		if err != nil {
+			t.Errorf("ValidateSelector(%q) = %v, want nil", tt.in, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("ValidateSelector(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+
+	invalid := []string{
+		"job=\"kubelet\"\nmalicious",          // newline
+		"job=\"a\"} or {x=\"y\"",              // escapes its own braces
+		"{{nested}}",                          //
+		strings.Repeat("a", maxSelectorLen+1), // unbounded length
+	}
+	for _, s := range invalid {
+		if _, err := ValidateSelector(s); err == nil {
+			t.Errorf("ValidateSelector(%q) = nil, want error", s)
+		}
 	}
 }

@@ -93,3 +93,79 @@ func TestLoadRejectsBadConfig(t *testing.T) {
 		})
 	}
 }
+
+// The empty URL is a working configuration, not a missing one: it is what
+// keeps a deployment with no metrics backend from advertising three tools that
+// would fail on every call.
+func TestMetricsDisabledByDefault(t *testing.T) {
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.PrometheusURL != "" {
+		t.Errorf("PrometheusURL = %q, want empty by default", c.PrometheusURL)
+	}
+	if c.MetricsEnabled() {
+		t.Error("MetricsEnabled() is true with no Prometheus configured")
+	}
+	if c.PrometheusTimeout != 15*time.Second {
+		t.Errorf("PrometheusTimeout = %s, want 15s", c.PrometheusTimeout)
+	}
+	if c.PromQLMaxSeries != 100 || c.MetricsListLimit != 500 {
+		t.Errorf("metrics bounds not defaulted: %+v", c)
+	}
+}
+
+func TestMetricsEnabledByURL(t *testing.T) {
+	t.Setenv("FATHOM_MCP_PROMETHEUS_URL", "  http://prometheus.observability.svc:9090  ")
+	t.Setenv("FATHOM_MCP_PROMQL_MAX_SERIES", "25")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Trimmed, because a trailing space in a Helm value would otherwise become
+	// an unparseable URL at startup.
+	if c.PrometheusURL != "http://prometheus.observability.svc:9090" {
+		t.Errorf("PrometheusURL = %q, want it trimmed", c.PrometheusURL)
+	}
+	if !c.MetricsEnabled() {
+		t.Error("MetricsEnabled() is false with a URL configured")
+	}
+	if c.PromQLMaxSeries != 25 {
+		t.Errorf("PromQLMaxSeries = %d, want 25", c.PromQLMaxSeries)
+	}
+}
+
+// A URL that cannot work must fail the pod at startup, where the error names
+// the variable, rather than at the first tool call.
+func TestLoadRejectsBadPrometheusConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"no scheme", map[string]string{"PROMETHEUS_URL": "prometheus:9090"}, "PROMETHEUS_URL"},
+		{"wrong scheme", map[string]string{"PROMETHEUS_URL": "ftp://p:9090"}, "PROMETHEUS_URL"},
+		{"no host", map[string]string{"PROMETHEUS_URL": "http://"}, "PROMETHEUS_URL"},
+		{"zero timeout", map[string]string{"PROMETHEUS_TIMEOUT": "0s"}, "PROMETHEUS_TIMEOUT"},
+		{"zero series cap", map[string]string{"PROMQL_MAX_SERIES": "0"}, "PROMQL_MAX_SERIES"},
+		{"negative query cap", map[string]string{"PROMQL_MAX_QUERY_LENGTH": "-1"}, "PROMQL_MAX_QUERY_LENGTH"},
+		{"zero label values", map[string]string{"METRICS_LABEL_VALUES": "0"}, "METRICS_LABEL_VALUES"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.env {
+				t.Setenv("FATHOM_MCP_"+k, v)
+			}
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("Load accepted %v", tt.env)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error %q does not name %s", err, tt.want)
+			}
+		})
+	}
+}
