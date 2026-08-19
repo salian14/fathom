@@ -1,6 +1,6 @@
 [project]
 name = "fathom-agent"
-version = "0.4.1"
+version = "0.5.0"
 description = "Fathom's agent: drives an Ollama model against the read-only Kubernetes tools exposed by fathom-mcp."
 requires-python = ">=3.12"
 
