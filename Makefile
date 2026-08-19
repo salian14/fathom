@@ -1,21 +1,23 @@
 # Fathom -- top-level release Makefile.
 #
-# The components build and test independently (agent/Makefile, mcp/Makefile) and
-# nothing here replaces that. This file exists for the one operation that spans
-# both: cutting a version.
+# The components build and test independently (agent/Makefile, mcp/Makefile,
+# fathom-front/Makefile) and nothing here replaces that. This file exists for
+# the one operation that spans them all: cutting a version.
 #
 #     make release BUMP=minor
 #
-# runs both component checks, bumps agent and mcp to the same next semver,
-# commits and tags that bump, builds and pushes both images at that tag, and
-# rolls both charts out with it.
+# runs every component check, bumps all three components to the same next
+# semver, commits and tags that bump, builds and pushes every image at that tag,
+# and rolls every chart out with it.
 #
-# The two versions move in lockstep on purpose -- one Fathom version, not two.
-# The base is the highest version either chart currently declares, so the charts
-# converge on the first release even though they have drifted (mcp appVersion
-# 0.3.0 vs agent 0.2.0 at the time this was written).
+# The versions move in lockstep on purpose -- one Fathom version, not three.
+# The base is the highest version any chart currently declares, so the charts
+# converge on the first release even when they have drifted (mcp appVersion
+# 0.3.0 vs agent 0.2.0 at the time this was written). A new component joins at
+# the current version rather than at 0.1.0 for the same reason: the base is read
+# from the charts, and a low outlier is invisible while a high one moves it.
 #
-# The image tag is not passed around out of band: both charts default
+# The image tag is not passed around out of band: every chart defaults
 # `image.tag` to `.Chart.AppVersion`, so bumping the chart is what re-points the
 # Deployment. `--set image.tag` is still passed at deploy time so a stale chart
 # checkout cannot quietly ship the previous image.
@@ -26,21 +28,27 @@
 # commit and the tag stay local and go out through the normal PR flow.
 #
 # Deploy is ordered, not merely sequenced: fathom-agent does not roll until
-# fathom-mcp's new pods are actually serving.
+# fathom-mcp's new pods are actually serving, and fathom-front does not roll
+# until the agent's are.
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 .NOTPARALLEL:
 
 # Build/push/check order, not alphabetical: the mcp chart owns the fathom
-# Namespace and exposes the tools the agent dials on startup. `deploy` does not
-# loop over this -- see the deploy targets, where the two are not symmetric.
-COMPONENTS := mcp agent
-CHARTS     := mcp/helm/Chart.yaml agent/helm/Chart.yaml
+# Namespace and exposes the tools the agent dials on startup, and fathom-front
+# proxies to the agent. `deploy` does not loop over this -- see the deploy
+# targets, where the three are not symmetric.
+COMPONENTS := mcp agent fathom-front
+CHARTS     := mcp/helm/Chart.yaml agent/helm/Chart.yaml fathom-front/helm/Chart.yaml
 
 # Everything the bump rewrites and then commits. CURRENT is still derived from
 # the charts alone: the agent package files are followers, not a source of
 # truth, and their stale version must not drag the release base down.
+#
+# fathom-front adds nothing here. Like mcp, its version is injected at build
+# time via -ldflags, so there is no version string checked into its source to
+# fall behind.
 VERSIONED := $(CHARTS) agent/pyproject.toml agent/src/fathom_agent/__init__.py
 
 BUMP        ?=
@@ -82,17 +90,17 @@ TAG        ?= v$(NEXT)
 help:
 	@echo "Fathom release targets"
 	@echo
-	@echo "  make release BUMP=major|minor|patch   check, bump, build, push, deploy -- both components"
+	@echo "  make release BUMP=major|minor|patch   check, bump, build, push, deploy -- all components"
 	@echo "  make release-major | release-minor | release-patch"
 	@echo "  make release VERSION=1.4.2            pin an exact version instead of bumping"
 	@echo
 	@echo "  make version                          show the current and next version"
-	@echo "  make check                            run both component checks"
+	@echo "  make check                            run every component check"
 	@echo "  make bump BUMP=patch                  rewrite the version files, then commit and tag them"
-	@echo "  make push  BUMP=patch                 build and push both images only"
-	@echo "  make deploy                           helm upgrade both charts -- agent waits on mcp"
-	@echo "  make render                           render both charts at the next version"
-	@echo "  make clean                            clean both components"
+	@echo "  make push  BUMP=patch                 build and push every image only"
+	@echo "  make deploy                           helm upgrade every chart -- each waits on the last"
+	@echo "  make render                           render every chart at the next version"
+	@echo "  make clean                            clean every component"
 	@echo
 	@echo "Knobs:  ALLOW_DIRTY=1  SKIP_CHECK=1  NO_COMMIT=1  NO_TAG=1"
 	@echo "        HELM_NAMESPACE=<ns>  HELM_FLAGS='...'  FATHOM_NS=<ns>  ROLLOUT_TIMEOUT=5m"
@@ -215,13 +223,14 @@ push: guard-next
 	  $(MAKE) --no-print-directory -C $$c push VERSION=$(NEXT) || exit 1; \
 	done
 
-# Not a loop over $(COMPONENTS): the two halves are not symmetric. The agent
-# dials fathom-mcp on startup, so it must not roll until mcp's new pods are
-# serving -- an agent pod that comes up against a half-rolled mcp fails its
+# Not a loop over $(COMPONENTS): the three are not symmetric. Each dials the one
+# before it on startup -- the agent dials fathom-mcp, fathom-front's readiness
+# is the agent's -- so each must not roll until the previous one's new pods are
+# serving. A pod that comes up against a half-rolled dependency fails its
 # readiness probe and restarts. HELM_FLAGS' --wait is not enough to lean on
 # here: it is a knob, and overriding it would silently remove the gate.
 .PHONY: deploy
-deploy: deploy-mcp deploy-agent
+deploy: deploy-mcp deploy-agent deploy-front
 
 .PHONY: deploy-mcp
 deploy-mcp: guard-next
@@ -244,6 +253,17 @@ deploy-agent: guard-next
 	@kubectl -n $(FATHOM_NS) rollout status deploy/fathom-agent --timeout=$(ROLLOUT_TIMEOUT)
 	@echo "==> fathom-agent ready at $(NEXT)"
 
+# Last, and gated on the agent above for the same reason the agent is gated on
+# mcp: fathom-front's readiness probe *is* the agent's readiness, so rolling it
+# against a half-rolled agent produces a pod that will not go ready.
+.PHONY: deploy-front
+deploy-front: guard-next
+	@echo "==> deploy: fathom-front at $(NEXT)"
+	@helm upgrade --install fathom-front ./fathom-front/helm $(HELM_NS_FLAG) $(HELM_FLAGS) \
+	  --set image.tag=$(NEXT)
+	@kubectl -n $(FATHOM_NS) rollout status deploy/fathom-front --timeout=$(ROLLOUT_TIMEOUT)
+	@echo "==> fathom-front ready at $(NEXT)"
+
 # Preview only: this renders the *current* charts with the next image tag, so the
 # chart labels still read the old version until `make bump` has run.
 .PHONY: render
@@ -256,7 +276,7 @@ render: guard-next
 release: preflight check bump push deploy
 	@echo
 	@echo "==> released $(NEXT)"
-	@echo "    images:  fathom-mcp:$(NEXT), fathom-agent:$(NEXT)"
+	@echo "    images:  fathom-mcp:$(NEXT), fathom-agent:$(NEXT), fathom-front:$(NEXT)"
 	@echo "    commit:  $(COMMIT_MSG)"
 	@echo "    tag:     $(TAG)"
 	@echo "    neither is pushed -- take the branch through the usual PR flow."

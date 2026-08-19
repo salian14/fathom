@@ -1,0 +1,13 @@
+{{- if and .Values.namespace.create .Values.namespace.name }}
+{{/*
+Off by default. The fathom-mcp chart already creates this namespace, and two
+releases both declaring the same Namespace object collide on install. Turn this on
+only when deploying the UI into a namespace nothing else owns.
+*/}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace.name }}
+  labels:
+    {{- include "fathom-front.labels" . | nindent 4 }}
+{{- end }}

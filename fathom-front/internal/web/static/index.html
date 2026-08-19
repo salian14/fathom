@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fathom</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <header class="sidebar-head">
+      <h1>Fathom</h1>
+      <button id="new-chat" type="button">New chat</button>
+    </header>
+    <nav><ul id="chat-list"></ul></nav>
+    <footer class="sidebar-foot">
+      <span id="status-dot" class="dot" data-state="unknown" aria-hidden="true"></span>
+      <span id="status-text">checking…</span>
+    </footer>
+  </aside>
+
+  <main id="main">
+    <div id="thread" role="log" aria-live="polite" aria-label="Conversation"></div>
+
+    <form id="composer" autocomplete="off">
+      <textarea id="question" rows="1" placeholder="Ask about the cluster…"
+                aria-label="Your question"></textarea>
+      <button id="send" type="submit">Ask</button>
+      <button id="stop" type="button" hidden>Stop</button>
+    </form>
+    <p id="hint">Enter sends · Shift+Enter for a newline · answers take 30–180s</p>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

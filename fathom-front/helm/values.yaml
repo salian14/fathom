@@ -1,0 +1,100 @@
+namespace:
+  name: fathom
+  # False by default: the fathom-mcp chart already creates this namespace, and two
+  # releases both owning a Namespace object collide on install.
+  create: false
+
+replicaCount: 1
+image:
+  repository: registry.lab:5000/fathom-front
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  # NodePort for the same reason the agent uses one: the nodes share the
+  # 192.168.56.0/24 libvirt network with the workstation, so http://<node-ip>:<nodePort>
+  # opens the UI with no tunnel. ClusterIP plus a port-forward works too.
+  type: NodePort
+  port: 8080
+  # 30080 is fathom-agent's. Pinned rather than left to the API server so the
+  # bookmark survives a reinstall; must be inside service-node-port-range,
+  # 30000-32767 by default. Set to null to let k8s pick.
+  nodePort: 30081
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+agent:
+  # The agent's ClusterIP Service. The browser never dials this -- it reaches
+  # /api/chat on this pod, which forwards here -- which is why the agent needs
+  # no CORS configuration and could drop its own NodePort entirely.
+  #
+  # Base URL only: /chat and /readyz are the agent's API, not deployment knobs.
+  url: http://fathom-agent.fathom.svc.cluster.local:8080
+  # Must exceed the agent's own requestTimeout (180s). If this fires first the
+  # browser gets "the agent did not answer in time" instead of the agent's own
+  # 504, which says how long it actually waited.
+  timeout: 200s
+  # Bounds the /readyz call into the agent. Short because the agent caches its
+  # readiness for 30s, so this never waits on a real dependency check.
+  readyTimeout: 5s
+
+front:
+  logLevel: info
+  # A question plus a context-capped transcript is a few kilobytes. 256Ki is
+  # slack, not a target.
+  maxBodyBytes: 262144
+
+otel:
+  # otlp | console | off.
+  #
+  # "console" writes spans to stderr and needs no collector, which is what makes
+  # `make run-local` usable. "off" still installs the context propagator, so a
+  # front end with telemetry disabled still hands trace context to the agent.
+  mode: otlp
+  # The collector lives in another namespace, so this has to be an FQDN. The
+  # http:// scheme selects plaintext gRPC; there is no TLS in the lab.
+  endpoint: http://otel-collector.observability.svc.cluster.local:4317
+  # Probes are excluded before sampling, so this only samples real work, and
+  # parentbased means a child never disagrees with its parent.
+  sampler: parentbased_always_on
+  # Milliseconds. 60s keeps the metric stream cheap on a 3-VM lab cluster.
+  metricExportInterval: 60000
+  # Becomes deployment.environment.name on every span and metric.
+  environment: lab
+
+extraEnv: []
+
+resources:
+  requests:
+    cpu: 50m
+    # A static Go binary serving a few KB of embedded assets. Most of this is
+    # the OTel SDK's batch queue and the gRPC exporter.
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

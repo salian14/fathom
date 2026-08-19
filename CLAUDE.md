@@ -4,18 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Phase 1 is built. All three deliverables exist and are deployable: `ollama/`, `agent/` (Python),
-`mcp/` (Go). Both components carry OpenTelemetry instrumentation.
+Phase 1 is built. All four deliverables exist and are deployable: `ollama/`, `agent/` (Python),
+`mcp/` (Go) and `fathom-front/` (Go). All three in-cluster services carry OpenTelemetry
+instrumentation.
 
 ## What this is
 
-Fathom is an agentic AI system: two services running as workloads inside a local Kubernetes cluster,
-driving a host-side Ollama model to answer questions about that cluster using read-only tools.
+Fathom is an agentic AI system: three services running as workloads inside a local Kubernetes
+cluster, driving a host-side Ollama model to answer questions about that cluster using read-only
+tools.
 
 - **`agent/`** — Python 3.12, FastAPI + LangGraph. Owns the agent loop and the `POST /chat` API.
   Holds no Kubernetes credentials at all.
 - **`mcp/`** — Go, an MCP server over streamable HTTP. Owns every read-only tool and the only
   service account that can read the cluster.
+- **`fathom-front/`** — Go, a chat UI served from the binary with `/api/chat` reverse-proxied to
+  the agent. Holds no Kubernetes credentials and no conversation state.
 
 The split matters: the agent pod runs with `automountServiceAccountToken: false` and no RBAC, so
 every cluster read goes through `fathom-mcp`. Widening what the agent can see is an RBAC change in
@@ -23,13 +27,14 @@ every cluster read goes through `fathom-mcp`. Widening what the agent can see is
 
 ## Topology (the important part)
 
-Four moving pieces:
+Five moving pieces:
 
 | Piece | Runs where |
 |---|---|
 | Ollama model server | **Host machine**, outside the cluster |
 | `fathom-agent` (Python) | **Inside** the cluster, namespace `fathom` |
 | `fathom-mcp` (Go) | **Inside** the cluster, namespace `fathom` |
+| `fathom-front` (Go) | **Inside** the cluster, namespace `fathom` |
 | otel-collector | **Inside** the cluster, namespace `observability` |
 
 The consequence that shapes most of the code: **the agent and the model are on opposite sides of a
@@ -72,26 +77,32 @@ only read the TSDB, and `run_promql` is instant-query only.
 Each component is its own top-level directory, with its own chart and its own release lifecycle:
 
 ```
-ollama/   host-side Ollama setup — config.env (all knobs) + setup.sh (applies them)
-agent/    Python agent — src/fathom_agent/, tests/, Dockerfile, helm/
-mcp/      Go MCP server — cmd/, internal/, Dockerfile, helm/
+ollama/        host-side Ollama setup — config.env (all knobs) + setup.sh (applies them)
+agent/         Python agent — src/fathom_agent/, tests/, Dockerfile, helm/
+mcp/           Go MCP server — cmd/, internal/, Dockerfile, helm/
+fathom-front/  Go chat UI — cmd/, internal/ (assets embedded), Dockerfile, helm/
 ```
 
-There is no top-level `helm/`. The charts are `agent/helm` and `mcp/helm`; `mcp/helm` creates the
-`fathom` namespace and `agent/helm` does not, because two releases owning one Namespace object
-collide on install.
+There is no top-level `helm/`. The charts are `agent/helm`, `mcp/helm` and `fathom-front/helm`;
+`mcp/helm` creates the `fathom` namespace and the other two do not, because two releases owning
+one Namespace object collide on install.
 
-Build and test: `make check` in either component (`fmt`, `lint`/`vet`, tests, chart lint).
+The top-level `Makefile` cuts one version across all three at once (`make release BUMP=patch`).
+A component joins it by appending to `COMPONENTS` and `CHARTS` and adding an ordered
+`deploy-<name>` target — ordered because each service's readiness depends on the one before it:
+mcp, then agent, then front.
+
+Build and test: `make check` in any component (`fmt`, `lint`/`vet`, tests, chart lint).
 
 ## Telemetry
 
-Both services export OTLP traces and metrics over **gRPC** to
+All three in-cluster services export OTLP traces and metrics over **gRPC** to
 `otel-collector.observability.svc.cluster.local:4317`, plaintext. Logs are not exported — they stay
 on stdout and carry `trace_id`/`span_id` for correlation.
 
 Configuration is the standard `OTEL_*` environment variables, read by the SDKs directly. The one
-exception is `FATHOM_AGENT_TELEMETRY` / `FATHOM_MCP_TELEMETRY` (`otlp` | `console` | `off`), which
-picks the exporter rather than tuning one. `console` writes to **stderr** and needs no collector —
+exception is `FATHOM_AGENT_TELEMETRY` / `FATHOM_MCP_TELEMETRY` / `FATHOM_FRONT_TELEMETRY`
+(`otlp` | `console` | `off`), which picks the exporter rather than tuning one. `console` writes to **stderr** and needs no collector —
 use it for local runs, and note that stdout is unusable for this in `mcp` because the stdio
 transport carries JSON-RPC there.
 
@@ -100,14 +111,22 @@ Two rules when touching this:
 - **Adding a boundary means instrumenting it.** Prefer the auto-instrumentation libraries over
   hand-rolled spans; reach for a manual span only where no instrumentor can see the seam. There
   are three such boundaries in `fathom-mcp`: inbound MCP, the Kubernetes API, and — when
-  configured — Prometheus. Each is instrumented by wrapping its transport once at construction,
+  configured — Prometheus. `fathom-front` has two: inbound HTTP from the browser and outbound
+  HTTP to the agent. Each is instrumented by wrapping its transport once at construction,
   never per call.
-- **Probes are excluded, not sampled.** `/healthz` and `/readyz` produce no spans on either side.
+- **Probes are excluded, not sampled.** `/healthz` and `/readyz` produce no spans anywhere.
   The agent suppresses instrumentation around its dependency checks and opens their MCP session
   without a span; `fathom-mcp` in turn drops inbound requests that carry no trace context, since
   that is exactly what the suppressed probe looks like from the far side. `tools/call` is exempt,
   so a propagation failure surfaces as root spans rather than silence. Verified end to end: a
-  probe cycle emits zero spans, a real `/chat` emits one trace across both services.
+  probe cycle emits zero spans, a real `/chat` emits one trace across every service it touches.
+
+  **`fathom-front` is the exception to the trace-context rule, and it is not a bug.** A browser
+  sends no `traceparent`, so the front is where a request first acquires a trace id — it is the
+  root, not a middle hop. Its filter excludes the two probe paths and nothing else; copying
+  `fathom-mcp`'s "drop what carries no trace context" rule here would silence every real request
+  and leave the probes as the only traced traffic. See `fathom-front/internal/telemetry/httpfilter.go`,
+  which says so at the point where someone would be tempted to change it.
 
 Metric labels must stay low-cardinality: resource kinds, tool names, error classes, and Prometheus
 endpoint kinds (`query`, `series`, `metadata`, `label_values`) are safe; object names, selectors,

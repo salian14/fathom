@@ -1,0 +1,16 @@
+apiVersion: v2
+name: fathom-front
+description: >-
+  Fathom's chat UI: a static conversational front end for fathom-agent, served
+  from the binary and reverse-proxied to the agent so page and API share an
+  origin. Holds no Kubernetes credentials and no conversation state.
+type: application
+
+version: 0.4.1
+appVersion: "0.4.1"
+
+keywords:
+  - fathom
+  - frontend
+  - chat
+  - kubernetes

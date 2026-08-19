@@ -1,0 +1,40 @@
+fathom-front {{ .Chart.AppVersion }} installed into namespace {{ include "fathom-front.namespace" . }}.
+
+{{ if eq .Values.service.type "NodePort" -}}
+Open it from your workstation on any node's IP -- no port-forward needed:
+
+  NODE=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+  echo http://$NODE:{{ .Values.service.nodePort | default "<assigned-nodeport>" }}
+{{- if not .Values.service.nodePort }}
+  # nodePort was left unset, so the API server assigned one. Read it back with:
+  #   kubectl -n {{ include "fathom-front.namespace" . }} get svc {{ include "fathom-front.fullname" . }} -o jsonpath='{.spec.ports[0].nodePort}'
+{{- end }}
+{{ else -}}
+The Service is {{ .Values.service.type }}, so tunnel to it first:
+
+  kubectl -n {{ include "fathom-front.namespace" . }} port-forward svc/{{ include "fathom-front.fullname" . }} 8082:{{ .Values.service.port }}
+  # then open http://localhost:8082
+{{ end }}
+It proxies to one endpoint and nothing else:
+
+  Agent   {{ .Values.agent.url }}  (turn budget {{ .Values.agent.timeout }})
+
+/readyz here reports the AGENT's readiness, forwarding its message verbatim, so a
+503 still names whether Ollama or the MCP server is the one that failed:
+
+  curl -s http://$NODE:{{ .Values.service.nodePort | default "<nodeport>" }}/readyz
+
+Two things worth knowing before the first question:
+
+  * Answers are not streamed. One turn blocks for 30-180s and the page shows a
+    running count while it waits. That is normal, not a hang.
+  * Conversations live in the browser, not here. The agent's /chat is stateless,
+    so the page replays the transcript each turn and "New chat" is purely local.
+    Clearing site data clears the history; a pod restart does not.
+
+This release grants the UI NO Kubernetes permissions -- it talks to fathom-agent
+over HTTP and to nothing else, and the pod mounts no token. This should print
+nothing but a warning:
+
+  kubectl auth can-i --list \
+    --as=system:serviceaccount:{{ include "fathom-front.namespace" . }}:{{ include "fathom-front.serviceAccountName" . }}
