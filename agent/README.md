@@ -134,13 +134,15 @@ kubectl -n fathom get pods -l app.kubernetes.io/name=fathom-agent   # want 1/1
 From `agent/`:
 
 ```sh
-make check                    # ruff format + lint, pytest, helm lint + template
-make push VERSION=0.1.0
+make check                    # lock-check, ruff format + lint, pytest, helm lint + template
+make help                     # the full target list
+make push VERSION=0.5.1
 ```
 
-The tag matters: the chart defaults `image.tag` to `.Chart.AppVersion` (`0.1.0`).
-`make image` without `VERSION` derives a tag from `git describe`, which will not
-match — pass `--set image.tag=<tag>` at install time in that case.
+The tag matters: the chart defaults `image.tag` to `.Chart.AppVersion`, the
+version declared in `helm/Chart.yaml`. `make image` without `VERSION` derives a
+tag from `git describe`, which will not match — pass `--set image.tag=<tag>` at
+install time in that case.
 
 The registry notes in `../mcp/README.md` apply unchanged here: the insecure-registry
 configuration, and the `ctr -n k8s.io images import` side-load fallback if the
@@ -266,6 +268,11 @@ environment variables, the same pattern the MCP server uses.
 | `agent.readyCache` | `30s` | How long a `/readyz` result is reused |
 | `agent.logLevel` | `info` | `debug`, `info`, `warn`, `error` |
 | `agent.systemPrompt` | `""` | Empty uses the prompt built into the image |
+| `otel.mode` | `otlp` | `otlp`, `console` or `off` — picks the exporter, not its tuning |
+| `otel.endpoint` | `http://otel-collector.observability.svc.cluster.local:4317` | Collector address. FQDN because it is another namespace; `http://` selects plaintext gRPC |
+| `otel.sampler` | `parentbased_always_on` | Probes are excluded before sampling, so this only samples real work |
+| `otel.metricExportInterval` | `60000` | Milliseconds between metric exports |
+| `otel.environment` | `lab` | Becomes `deployment.environment.name` on every span and metric |
 
 ### Why the model parameters are not here
 
@@ -329,15 +336,15 @@ the `answer` field says so explicitly rather than returning nothing.
 variable, e.g. `fathom-agent: FATHOM_AGENT_MCP_TIMEOUT (60.0s) exceeds
 FATHOM_AGENT_REQUEST_TIMEOUT (30.0s)`. Read the first line of the logs.
 
-**`OOMKilled`** — the memory limit is 1Gi and the LangChain import tree is most of
+**`OOMKilled`** — the memory limit is 1536Mi and the LangChain import tree is most of
 the baseline. Raise `resources.limits.memory` rather than trimming dependencies.
 
 ## Upgrade and uninstall
 
 ```sh
-helm upgrade fathom-agent ./helm --set image.tag=0.2.0
+helm upgrade fathom-agent ./helm --set image.tag=0.5.2
 helm uninstall fathom-agent
 ```
 
-Changes to `agent.*`, `ollama.*` or `mcp.*` roll the pods automatically — the
-Deployment carries a `checksum/config` annotation over those blocks.
+Changes to `agent.*`, `ollama.*`, `mcp.*` or `otel.*` roll the pods automatically —
+the Deployment carries a `checksum/config` annotation over those blocks.

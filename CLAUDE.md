@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Status
 
 Phase 1 is built. All four deliverables exist and are deployable: `ollama/`, `agent/` (Python),
-`mcp/` (Go) and `fathom-front/` (Go). All three in-cluster services carry OpenTelemetry
+`mcp/` (Go) and `front/` (Go). All three in-cluster services carry OpenTelemetry
 instrumentation.
 
 ## What this is
@@ -18,7 +18,7 @@ tools.
   Holds no Kubernetes credentials at all.
 - **`mcp/`** — Go, an MCP server over streamable HTTP. Owns every read-only tool and the only
   service account that can read the cluster.
-- **`fathom-front/`** — Go, a chat UI served from the binary with `/api/chat` reverse-proxied to
+- **`front/`** — Go, a chat UI served from the binary with `/api/chat` reverse-proxied to
   the agent. Holds no Kubernetes credentials and no conversation state.
 
 The split matters: the agent pod runs with `automountServiceAccountToken: false` and no RBAC, so
@@ -80,10 +80,10 @@ Each component is its own top-level directory, with its own chart and its own re
 ollama/        host-side Ollama setup — config.env (all knobs) + setup.sh (applies them)
 agent/         Python agent — src/fathom_agent/, tests/, Dockerfile, helm/
 mcp/           Go MCP server — cmd/, internal/, Dockerfile, helm/
-fathom-front/  Go chat UI — cmd/, internal/ (assets embedded), Dockerfile, helm/
+front/         Go chat UI — cmd/, internal/ (assets embedded), Dockerfile, helm/
 ```
 
-There is no top-level `helm/`. The charts are `agent/helm`, `mcp/helm` and `fathom-front/helm`;
+There is no top-level `helm/`. The charts are `agent/helm`, `mcp/helm` and `front/helm`;
 `mcp/helm` creates the `fathom` namespace and the other two do not, because two releases owning
 one Namespace object collide on install.
 
@@ -92,7 +92,15 @@ A component joins it by appending to `COMPONENTS` and `CHARTS` and adding an ord
 `deploy-<name>` target — ordered because each service's readiness depends on the one before it:
 mcp, then agent, then front.
 
-Build and test: `make check` in any component (`fmt`, `lint`/`vet`, tests, chart lint).
+Build and test: `make check` in any component (`fmt`, `lint`, tests, chart lint).
+
+The three component Makefiles are deliberately uniform: `help build fmt lint test check
+image push lint-chart render-chart run-local version clean all` mean the same thing in
+each, so `make -C <component> <target>` works without knowing the language behind it, and
+`make` with no target prints `help`. Anything outside that list is component-specific and
+named so — `run-stdio` in `mcp`, `venv`/`lock`/`lock-check` in `agent`, `test-ui` in
+`front`; the Go components keep `vet` as an alias for `lint`. A new target that
+belongs to all three goes into all three, or it is not part of the shared set.
 
 ## Telemetry
 
@@ -125,7 +133,7 @@ Two rules when touching this:
   sends no `traceparent`, so the front is where a request first acquires a trace id — it is the
   root, not a middle hop. Its filter excludes the two probe paths and nothing else; copying
   `fathom-mcp`'s "drop what carries no trace context" rule here would silence every real request
-  and leave the probes as the only traced traffic. See `fathom-front/internal/telemetry/httpfilter.go`,
+  and leave the probes as the only traced traffic. See `front/internal/telemetry/httpfilter.go`,
   which says so at the point where someone would be tempted to change it.
 
 Metric labels must stay low-cardinality: resource kinds, tool names, error classes, and Prometheus

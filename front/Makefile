@@ -1,6 +1,6 @@
 # fathom-front -- component Makefile.
 #
-# The three component Makefiles (mcp, agent, fathom-front) expose the same
+# The three component Makefiles (mcp, agent, front) expose the same
 # target names with the same meanings, so `make -C <component> <target>` works
 # without knowing which language is behind it:
 #

@@ -31,21 +31,22 @@ kubectl get nodes
 From `mcp/`:
 
 ```sh
-make image VERSION=0.1.0
+make image VERSION=0.5.1
 ```
 
-This produces `registry.lab:5000/fathom-mcp:0.1.0`. The registry host comes from
+This produces `registry.lab:5000/fathom-mcp:0.5.1`. The registry host comes from
 `REGISTRY` (default `registry.lab:5000`); override it, or `IMAGE` outright, to
-build for somewhere else. The tag matters: the chart defaults
-`image.tag` to `.Chart.AppVersion`, which is `0.1.0`. `make image` without
-`VERSION` derives the tag from `git describe` (e.g. `8957f22-dirty`), which will
-not match the chart default — in that case pass `--set image.tag=<tag>` at
-install time.
+build for somewhere else. The tag matters: the chart defaults `image.tag` to
+`.Chart.AppVersion`, the version declared in `helm/Chart.yaml`. `make image`
+without `VERSION` derives the tag from `git describe` (e.g. `8957f22-dirty`),
+which will not match the chart default — in that case pass
+`--set image.tag=<tag>` at install time.
 
 Run the gates first if you are about to ship this anywhere:
 
 ```sh
 make check   # gofmt, go vet, go test, helm lint + template
+make help    # the full target list
 ```
 
 ## 2. Push the image
@@ -54,7 +55,7 @@ The chart's `image.repository` is `registry.lab:5000/fathom-mcp`, so the nodes
 pull from `registry.lab:5000`. Build and push in one step:
 
 ```sh
-make push VERSION=0.1.0
+make push VERSION=0.5.1
 ```
 
 `push` depends on `image`, so it builds first; it pushes exactly the tag it
@@ -77,8 +78,8 @@ Still workable if the registry is down or unreachable from a node. Build with a
 bare name so nothing tries to pull, and match the chart to it:
 
 ```sh
-make image VERSION=0.1.0 IMAGE=fathom-mcp
-docker save fathom-mcp:0.1.0 -o /tmp/fathom-mcp-0.1.0.tar
+make image VERSION=0.5.1 IMAGE=fathom-mcp
+docker save fathom-mcp:0.5.1 -o /tmp/fathom-mcp-0.5.1.tar
 ```
 
 Then, for each node that could schedule the pod (control plane plus both
@@ -86,7 +87,7 @@ workers, unless you constrain scheduling with `nodeSelector`):
 
 ```sh
 # copy the tar to the node, then on the node:
-sudo ctr -n k8s.io images import /tmp/fathom-mcp-0.1.0.tar
+sudo ctr -n k8s.io images import /tmp/fathom-mcp-0.5.1.tar
 sudo crictl images | grep fathom-mcp   # verify
 ```
 
@@ -176,7 +177,7 @@ environment variables. The ones that matter at deploy time:
 | Value | Default | What it does |
 |---|---|---|
 | `namespace.name` / `namespace.create` | `fathom` / `true` | Where the workload lives, and whether the chart creates it |
-| `image.repository` / `image.tag` | `registry.lab:5000/fathom-mcp` / chart appVersion | Image coordinates; tag falls back to `0.1.0` |
+| `image.repository` / `image.tag` | `registry.lab:5000/fathom-mcp` / chart appVersion | Image coordinates; an empty tag falls back to the chart's `appVersion` |
 | `service.port` | `8080` | Container port, Service port, and the listen address |
 | `server.path` | `/mcp` | HTTP path the MCP endpoint is served on |
 | `server.logLevel` | `info` | `debug`, `info`, `warn`, `error` |
@@ -266,7 +267,7 @@ about exactly this combination on install.
 ## Upgrade and uninstall
 
 ```sh
-helm upgrade fathom-mcp ./helm --set image.tag=0.2.0
+helm upgrade fathom-mcp ./helm --set image.tag=0.5.2
 helm uninstall fathom-mcp
 ```
 
@@ -275,7 +276,8 @@ Uninstall removes the ClusterRole and ClusterRoleBinding too. It removes the
 in the namespace with it, so check before you run it.
 
 Note that changes to `k8s.allowedResources` roll the pods automatically: the
-Deployment carries a `checksum/config` annotation over the `k8s` values block.
+Deployment carries a `checksum/config` annotation over the `k8s`, `server`,
+`limits`, `otel` and `prometheus` value blocks.
 
 ## Troubleshooting
 
@@ -325,8 +327,14 @@ FATHOM_MCP_LOG_MAX_TAIL_LINES (200)`). Read the first line of the logs.
 For local development against your kubeconfig, no cluster deploy involved:
 
 ```sh
-make run-stdio   # stdio transport, uses $KUBECONFIG or ~/.kube/config
+make run-local   # HTTP transport on :8080, uses $KUBECONFIG or ~/.kube/config
+make run-stdio   # stdio transport, same credentials
 ```
+
+`run-local` is the target every component has, and here it serves the same HTTP
+transport the agent pod dials — so `make -C agent run-local` reaches it with no
+port-forward. `run-stdio` is the component-specific one, for driving the server
+from an MCP client on this machine.
 
 In-cluster credentials are always tried first; the kubeconfig path
 (`FATHOM_MCP_KUBECONFIG_PATH`) is a fallback for exactly this case.

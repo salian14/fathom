@@ -1,7 +1,7 @@
 # Fathom -- top-level release Makefile.
 #
 # The components build and test independently (agent/Makefile, mcp/Makefile,
-# fathom-front/Makefile) and nothing here replaces that. This file exists for
+# front/Makefile) and nothing here replaces that. This file exists for
 # the one operation that spans them all: cutting a version.
 #
 #     make release BUMP=minor
@@ -39,8 +39,8 @@ SHELL := /bin/bash
 # Namespace and exposes the tools the agent dials on startup, and fathom-front
 # proxies to the agent. `deploy` does not loop over this -- see the deploy
 # targets, where the three are not symmetric.
-COMPONENTS := mcp agent fathom-front
-CHARTS     := mcp/helm/Chart.yaml agent/helm/Chart.yaml fathom-front/helm/Chart.yaml
+COMPONENTS := mcp agent front
+CHARTS     := mcp/helm/Chart.yaml agent/helm/Chart.yaml front/helm/Chart.yaml
 
 # Everything the bump rewrites and then commits. CURRENT is still derived from
 # the charts alone: the agent package files are followers, not a source of
@@ -259,7 +259,7 @@ deploy-agent: guard-next
 .PHONY: deploy-front
 deploy-front: guard-next
 	@echo "==> deploy: fathom-front at $(NEXT)"
-	@helm upgrade --install fathom-front ./fathom-front/helm $(HELM_NS_FLAG) $(HELM_FLAGS) \
+	@helm upgrade --install fathom-front ./front/helm $(HELM_NS_FLAG) $(HELM_FLAGS) \
 	  --set image.tag=$(NEXT)
 	@kubectl -n $(FATHOM_NS) rollout status deploy/fathom-front --timeout=$(ROLLOUT_TIMEOUT)
 	@echo "==> fathom-front ready at $(NEXT)"

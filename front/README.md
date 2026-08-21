@@ -47,7 +47,7 @@ Three things follow from that picture, and they are most of what this component 
 
 ## 1. Build and push the image
 
-From `fathom-front/`:
+From `front/`:
 
 ```sh
 make check                    # gofmt, go vet, go test, UI checks, helm lint + template
