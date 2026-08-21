@@ -51,7 +51,8 @@ From `fathom-front/`:
 
 ```sh
 make check                    # gofmt, go vet, go test, UI checks, helm lint + template
-make push VERSION=0.4.1
+make help                     # the full target list
+make push VERSION=0.5.1
 ```
 
 The tag matters: the chart defaults `image.tag` to `.Chart.AppVersion`. `make image` without
@@ -197,8 +198,8 @@ make run-local
 #   -> http://localhost:8082
 ```
 
-`run-local` listens on `:8082` (8080 is the port-forward to `fathom-mcp`, 8081 is the agent's
-own `run-local`) and uses `console` telemetry, so no collector is needed. Point it elsewhere
+`run-local` listens on `:8082` (8080 is `fathom-mcp`'s own `run-local` and the port-forward
+to it, 8081 is the agent's `run-local`) and uses `console` telemetry, so no collector is needed. Point it elsewhere
 with `make run-local AGENT_URL=http://...`.
 
 The UI checks run under plain `node` with no package.json and no build step:
@@ -240,7 +241,7 @@ instrumented when telemetry is on, so the agent's span becomes a new root.
 ## Upgrade and uninstall
 
 ```sh
-helm upgrade fathom-front ./helm --set image.tag=0.4.2
+helm upgrade fathom-front ./helm --set image.tag=0.5.2
 helm uninstall fathom-front
 ```
 
