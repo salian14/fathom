@@ -1,0 +1,75 @@
+{{- if .Values.judge.enabled }}
+{{- /*
+  The judge is a separate CronJob rather than a phase of the run, because it has an
+  entirely different cost profile: gemma4:31b runs on the HOST CPU (the RTX 2070 is
+  full of the agent's model) at roughly 1.5-2.5 tok/s, so a judgement takes minutes
+  where a graded turn takes seconds.
+
+  It is scheduled hours after the run window, and it also refuses at startup to do
+  anything while a run is still in flight -- the three VMs already pin 12 of the host's
+  20 threads, so a judge running beside a live evaluation would slow the agent and
+  inflate the very elapsed_seconds the run is recording. That is measurement error, not
+  a scheduling inconvenience.
+*/}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "fathom-eval.fullname" . }}-judge
+  namespace: {{ include "fathom-eval.namespace" . }}
+  labels:
+    {{- include "fathom-eval.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronjob.judgeSchedule | quote }}
+  suspend: {{ .Values.cronjob.suspend }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: {{ .Values.cronjob.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ .Values.cronjob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.cronjob.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ .Values.cronjob.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "fathom-eval.selectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "fathom-eval.serviceAccountName" . }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: fathom-eval-judge
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              args: ["judge"]
+              env:
+                {{- include "fathom-eval.env" . | nindent 16 }}
+              volumeMounts:
+                - name: results
+                  mountPath: {{ dir .Values.eval.dbPath }}
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+          volumes:
+            - name: results
+              {{- if .Values.persistence.enabled }}
+              persistentVolumeClaim:
+                claimName: {{ include "fathom-eval.fullname" . }}
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+            - name: tmp
+              emptyDir: {}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

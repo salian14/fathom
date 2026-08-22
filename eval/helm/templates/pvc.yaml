@@ -1,0 +1,27 @@
+{{- if .Values.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "fathom-eval.fullname" . }}
+  namespace: {{ include "fathom-eval.namespace" . }}
+  labels:
+    {{- include "fathom-eval.labels" . | nindent 4 }}
+  {{- if .Values.persistence.keep }}
+  annotations:
+    {{- /*
+      Every night of history lives in this one volume, and the default StorageClass
+      reclaim policy is Delete. Without this annotation a `helm uninstall` -- or a
+      chart rename -- takes the whole results database with it.
+    */}}
+    helm.sh/resource-policy: keep
+  {{- end }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with .Values.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}

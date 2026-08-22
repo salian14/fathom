@@ -39,8 +39,8 @@ SHELL := /bin/bash
 # Namespace and exposes the tools the agent dials on startup, and fathom-front
 # proxies to the agent. `deploy` does not loop over this -- see the deploy
 # targets, where the three are not symmetric.
-COMPONENTS := mcp agent front
-CHARTS     := mcp/helm/Chart.yaml agent/helm/Chart.yaml front/helm/Chart.yaml
+COMPONENTS := mcp agent front eval
+CHARTS     := mcp/helm/Chart.yaml agent/helm/Chart.yaml front/helm/Chart.yaml eval/helm/Chart.yaml
 
 # Everything the bump rewrites and then commits. CURRENT is still derived from
 # the charts alone: the agent package files are followers, not a source of
@@ -49,7 +49,8 @@ CHARTS     := mcp/helm/Chart.yaml agent/helm/Chart.yaml front/helm/Chart.yaml
 # fathom-front adds nothing here. Like mcp, its version is injected at build
 # time via -ldflags, so there is no version string checked into its source to
 # fall behind.
-VERSIONED := $(CHARTS) agent/pyproject.toml agent/src/fathom_agent/__init__.py
+VERSIONED := $(CHARTS) agent/pyproject.toml agent/src/fathom_agent/__init__.py \
+             eval/pyproject.toml eval/src/fathom_eval/__init__.py
 
 BUMP        ?=
 ALLOW_DIRTY ?=
@@ -68,6 +69,9 @@ HELM_FLAGS     ?= --wait --timeout 5m
 # only locates Helm's release metadata, while the pods the rollout gate waits on
 # are pinned to `namespace.name` by the charts themselves.
 FATHOM_NS       ?= fathom
+# The harness lives outside the fathom namespace on purpose: it is the only component
+# with write credentials, so it is kept away from the services it tests.
+EVAL_NS         ?= fathom-eval
 ROLLOUT_TIMEOUT ?= 5m
 
 CURRENT := $(shell grep -hE '^(version|appVersion):' $(CHARTS) \
@@ -103,7 +107,8 @@ help:
 	@echo "  make clean                            clean every component"
 	@echo
 	@echo "Knobs:  ALLOW_DIRTY=1  SKIP_CHECK=1  NO_COMMIT=1  NO_TAG=1"
-	@echo "        HELM_NAMESPACE=<ns>  HELM_FLAGS='...'  FATHOM_NS=<ns>  ROLLOUT_TIMEOUT=5m"
+	@echo "        HELM_NAMESPACE=<ns>  HELM_FLAGS='...'  FATHOM_NS=<ns>  EVAL_NS=<ns>"
+	@echo "        ROLLOUT_TIMEOUT=5m"
 	@echo
 	@echo "Current version: $(CURRENT)"
 
@@ -173,8 +178,10 @@ bump: guard-next
 	done
 	@sed -i -E 's/^version = .*/version = "$(NEXT)"/' agent/pyproject.toml
 	@sed -i -E 's/^__version__ = .*/__version__ = "$(NEXT)"/' agent/src/fathom_agent/__init__.py
-	@touch agent/requirements.lock
-	@echo "==> agent package -> $(NEXT)"
+	@sed -i -E 's/^version = .*/version = "$(NEXT)"/' eval/pyproject.toml
+	@sed -i -E 's/^__version__ = .*/__version__ = "$(NEXT)"/' eval/src/fathom_eval/__init__.py
+	@touch agent/requirements.lock eval/requirements.lock
+	@echo "==> agent and eval packages -> $(NEXT)"
 	@$(MAKE) --no-print-directory commit-bump VERSION=$(NEXT)
 	@$(MAKE) --no-print-directory tag VERSION=$(NEXT)
 
@@ -230,7 +237,7 @@ push: guard-next
 # readiness probe and restarts. HELM_FLAGS' --wait is not enough to lean on
 # here: it is a knob, and overriding it would silently remove the gate.
 .PHONY: deploy
-deploy: deploy-mcp deploy-agent deploy-front
+deploy: deploy-mcp deploy-agent deploy-front deploy-eval
 
 .PHONY: deploy-mcp
 deploy-mcp: guard-next
@@ -264,6 +271,29 @@ deploy-front: guard-next
 	@kubectl -n $(FATHOM_NS) rollout status deploy/fathom-front --timeout=$(ROLLOUT_TIMEOUT)
 	@echo "==> fathom-front ready at $(NEXT)"
 
+# Last, and unlike the other three it cannot gate on a rollout: a CronJob has no
+# rollout to wait for, and there is no pod to become ready between scheduled runs.
+#
+# Nor can it wait for the PVC to be Bound. The cluster's default StorageClass is
+# local-path with WaitForFirstConsumer, so the claim stays Pending *by design* until
+# something mounts it -- waiting on Bound here would hang until the timeout on a
+# perfectly healthy install. The gate is therefore what can actually be asserted: the
+# CronJob exists and its jobTemplate carries the tag we just pushed.
+#
+# Note the chart ships both CronJobs suspended. `make deploy` should not start a
+# multi-hour evaluation against a cluster it finished rolling seconds ago; unsuspending
+# is a deliberate act, and NOTES.txt says how.
+.PHONY: deploy-eval
+deploy-eval: guard-next
+	@echo "==> deploy: fathom-eval at $(NEXT)"
+	@helm upgrade --install fathom-eval ./eval/helm $(HELM_NS_FLAG) $(HELM_FLAGS) \
+	  --set image.tag=$(NEXT)
+	@img="$$(kubectl -n $(EVAL_NS) get cronjob fathom-eval \
+	          -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}')"; \
+	 case "$$img" in *:$(NEXT)) ;; \
+	   *) echo "error: fathom-eval CronJob is set to run $$img, expected :$(NEXT)"; exit 1;; esac
+	@echo "==> fathom-eval scheduled at $(NEXT) (suspended: $$(kubectl -n $(EVAL_NS) get cronjob fathom-eval -o jsonpath='{.spec.suspend}'))"
+
 # Preview only: this renders the *current* charts with the next image tag, so the
 # chart labels still read the old version until `make bump` has run.
 .PHONY: render
@@ -276,7 +306,7 @@ render: guard-next
 release: preflight check bump push deploy
 	@echo
 	@echo "==> released $(NEXT)"
-	@echo "    images:  fathom-mcp:$(NEXT), fathom-agent:$(NEXT), fathom-front:$(NEXT)"
+	@echo "    images:  fathom-mcp:$(NEXT), fathom-agent:$(NEXT), fathom-front:$(NEXT), fathom-eval:$(NEXT)"
 	@echo "    commit:  $(COMMIT_MSG)"
 	@echo "    tag:     $(TAG)"
 	@echo "    neither is pushed -- take the branch through the usual PR flow."

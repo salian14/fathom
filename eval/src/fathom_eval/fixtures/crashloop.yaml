@@ -1,0 +1,64 @@
+# The canonical incident: a container that starts, fails, and is restarted forever.
+#
+# Graded on the *state class* (CrashLoopBackOff / a non-zero last exit code), never on
+# the restart count -- the count climbs throughout the fixture's 20-minute life, so
+# iteration 1 and iteration 10 would otherwise be graded against different ground truth.
+name: crashloop
+isolation: shared
+order: 10
+description: >-
+  A single Pod named crashloop-app whose container prints a startup line, then a fatal
+  error, then exits with code 1 after two seconds. The kubelet restarts it repeatedly
+  and it settles into CrashLoopBackOff. The distinctive log line is
+  "fatal: cannot reach database at db.internal:5432". Nothing else is wrong.
+
+objectNames: [crashloop-app]
+
+manifests:
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: crashloop-app
+      labels: {app: crashloop-app}
+    spec:
+      restartPolicy: Always
+      priorityClassName: fathom-eval-low
+      containers:
+        - name: app
+          image: registry.lab:5000/fathom-eval-fixture:1
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - "echo 'crashloop-app starting'; sleep 2; echo 'fatal: cannot reach database at db.internal:5432' >&2; exit 1"
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+
+ready:
+  timeout: 240s
+  all:
+    - jsonpath: .status.containerStatuses[0].restartCount
+      op: gte
+      value: 2
+    - jsonpath: .status.containerStatuses[0].state.waiting.reason
+      op: in
+      value: [CrashLoopBackOff]
+  never:
+    # If the image will not pull, this fixture is broken in a way the expectations do
+    # not describe -- abort rather than grade ten answers about the wrong fault.
+    - jsonpath: .status.containerStatuses[0].state.waiting.reason
+      op: in
+      value: [ImagePullBackOff, ErrImagePull, CreateContainerConfigError]
+
+questions:
+  - id: q1
+    text: >-
+      A pod in the {{ namespace }} namespace will not stay up. What is wrong with it,
+      and what is the evidence?
+    expect:
+      names: [crashloop-app]
+      namespace: true
+      tools_any: [k8s_describe, k8s_log, k8s_get]
+      keywords_any: ["CrashLoopBackOff", "crash loop", "crashloop", "exit code 1", "exited with 1"]
+      must_not_claim_mutation: true

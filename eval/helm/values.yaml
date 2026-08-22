@@ -1,0 +1,145 @@
+namespace:
+  name: fathom-eval
+  # True, unlike agent/ and front/: this chart owns its own namespace. The fathom
+  # namespace belongs to the mcp chart and holds the services under test; the harness
+  # is deliberately somewhere else, because it is the one component in the repo that
+  # holds write credentials.
+  create: true
+
+image:
+  repository: registry.lab:5000/fathom-eval
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+  # Every namespace the harness may delete, by exact name. `create` cannot be
+  # name-scoped in RBAC at all (there is no object name to match before creation), so
+  # this list is the tightest half of the grant -- see the comment in rbac.yaml, and
+  # note the harness enforces the same prefix rule again in code.
+  fixtureNamespaces:
+    - fathom-eval-healthy
+    - fathom-eval-crashloop
+    - fathom-eval-imagepull
+    - fathom-eval-pending
+    - fathom-eval-missing-configmap
+    - fathom-eval-service-no-endpoints
+    - fathom-eval-secret-bait
+    - fathom-eval-prom-restarts
+    - fathom-eval-oomkill
+    - fathom-eval-cpu-throttle
+
+eval:
+  # The in-cluster Service, not the NodePort: dialling a node address from inside the
+  # cluster adds a dependency on a specific node for nothing.
+  agentUrl: http://fathom-agent.fathom.svc.cluster.local:8080
+  prometheusUrl: http://prometheus-server.observability.svc.cluster.local:80
+  # Iterations per question, per fixture. The user-facing requirement is at least 10.
+  iterations: 10
+  # Mirrors agent/helm values.yaml agent.maxIterations. Only sizes a sanity bound; the
+  # authoritative ceiling verdict comes from LangGraph's sentinel string.
+  agentMaxIterations: 8
+  # Must exceed the agent's own requestTimeout (180s) so its 504 reaches us as a 504
+  # rather than as a client-side abort that loses the agent's verdict.
+  requestTimeout: 240s
+  teardownTimeout: 180s
+  logLevel: info
+  dbPath: /data/results.db
+  # Empty runs the whole suite. A comma-separated list runs a subset.
+  fixtures: ""
+
+judge:
+  enabled: true
+  # The CPU-only second Ollama instance on the host. Not the agent's :11434 -- that one
+  # serves the model under test on the GPU, and loading a 31B judge there would evict
+  # it (OLLAMA_MAX_LOADED_MODELS=1). See ollama/judge.env.
+  url: http://192.168.56.1:11435
+  # The alias created by `ollama/setup.sh --judge`, never the raw base tag -- the same
+  # rule the agent follows, so swapping the judge model is a config change plus a
+  # re-run rather than an application change.
+  model: fathom-judge
+  # Judgements per fixture+question per run. A 31B on CPU takes minutes per judgement,
+  # so judging all 100 results would run for hours; 3 keeps a night's pass bounded.
+  # Set to 0 to judge everything.
+  sample: 3
+  timeout: 900s
+
+persistence:
+  enabled: true
+  # local-path is the cluster's default StorageClass. It is node-pinned by
+  # WaitForFirstConsumer, which is self-consistent (the PV's node affinity pulls later
+  # Jobs to the same node) but does mean the results live on one node's disk.
+  storageClass: ""
+  size: 2Gi
+  # Kept on `helm uninstall`. Without this the reclaim policy deletes the volume and
+  # every night of history with it.
+  keep: true
+
+cronjob:
+  # Shipped suspended on purpose. `make deploy-eval` runs at the end of a release, and
+  # an unsuspended CronJob would kick off a multi-hour evaluation against a cluster
+  # that was rolled seconds ago. Unsuspend deliberately, once.
+  suspend: true
+  schedule: "0 1 * * *"
+  # Well after the run window: the judge saturates host CPU, and running it against a
+  # live evaluation would inflate the elapsed_seconds it is meant to be measuring.
+  judgeSchedule: "0 7 * * *"
+  # 5h. A backstop for a stuck run, not a target -- a full run is ~2h.
+  activeDeadlineSeconds: 18000
+  # The harness's own soft deadline, below the hard one, so it stops and tears its
+  # fixtures down instead of being SIGKILLed with namespaces still standing.
+  softDeadlineSeconds: 14400
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  # Namespace deletion has to finish inside this.
+  terminationGracePeriodSeconds: 300
+
+otel:
+  mode: otlp
+  endpoint: http://otel-collector.observability.svc.cluster.local:4317
+  environment: lab
+
+priorityClass:
+  # Fixture pods get their own low-priority class with preemption disabled, so the
+  # oomkill and cpu-throttle fixtures can never evict fathom-agent or each other.
+  create: true
+  name: fathom-eval-low
+  value: -10
+
+extraEnv: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

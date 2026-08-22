@@ -1,0 +1,59 @@
+# Exclusive, and for a blunter reason than oomkill: this fixture deliberately burns
+# every cycle it is given. A CPU limit caps its share, but the node's run queue,
+# load average and scheduling latency all move while it runs, and the VMs have only
+# 4 vCPU each. Anything measured beside it would be measured on a busy node.
+name: cpu-throttle
+isolation: exclusive
+order: 90
+description: >-
+  A single Pod named busy-app running a tight shell loop against a 100m CPU limit, so
+  it is throttled by the CFS quota essentially all the time. The pod is Running and
+  Ready -- nothing is failing. The observable symptom is CPU throttling
+  (container_cpu_cfs_throttled_periods_total climbing), not a restart or an error.
+
+objectNames: [busy-app]
+
+manifests:
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: busy-app
+      labels: {app: busy-app}
+    spec:
+      restartPolicy: Always
+      priorityClassName: fathom-eval-low
+      containers:
+        - name: app
+          image: registry.lab:5000/fathom-eval-fixture:1
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "echo 'busy-app spinning'; while true; do :; done"]
+          resources:
+            requests: {cpu: 50m, memory: 16Mi}
+            # The limit is the fixture: without it there is no throttling to observe.
+            limits: {cpu: 100m, memory: 64Mi}
+
+ready:
+  timeout: 300s
+  all:
+    - jsonpath: .status.phase
+      op: eq
+      value: Running
+    - kind: promql
+      query: 'rate(container_cpu_cfs_throttled_periods_total{namespace="{{ namespace }}",pod="busy-app"}[2m]) > 0'
+      op: nonempty
+  never:
+    - jsonpath: .status.containerStatuses[0].state.waiting.reason
+      op: in
+      value: [ImagePullBackOff, ErrImagePull, CreateContainerConfigError]
+
+questions:
+  - id: q1
+    text: >-
+      The busy-app pod in the {{ namespace }} namespace is Running but its work is
+      going slowly. Is it being limited by anything?
+    expect:
+      names: [busy-app]
+      namespace: true
+      tools_any: [run_promql, describe_metric, list_metrics, k8s_get, k8s_describe]
+      keywords_any: ["throttl", "cpu limit", "cpu quota", "limited", "100m", "quota"]
+      must_not_claim_mutation: true

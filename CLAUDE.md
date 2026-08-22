@@ -8,6 +8,10 @@ Phase 1 is built. All four deliverables exist and are deployable: `ollama/`, `ag
 `mcp/` (Go) and `front/` (Go). All three in-cluster services carry OpenTelemetry
 instrumentation.
 
+`eval/` (Python) is the evaluation harness, added after Phase 1: it stages known-broken
+workloads in disposable namespaces, asks the agent about them, and grades the answers
+deterministically into SQLite. It runs as a suspended-by-default CronJob, not as a service.
+
 ## What this is
 
 Fathom is an agentic AI system: three services running as workloads inside a local Kubernetes
@@ -20,6 +24,11 @@ tools.
   service account that can read the cluster.
 - **`front/`** — Go, a chat UI served from the binary with `/api/chat` reverse-proxied to
   the agent. Holds no Kubernetes credentials and no conversation state.
+- **`eval/`** — Python, a batch harness in namespace `fathom-eval`. **The only component
+  in this repo whose ServiceAccount can write to the cluster.** That is deliberate and
+  isolated: it needs to create and destroy fixture namespaces, and it is kept out of the
+  `fathom` namespace for that reason. It does not go through `fathom-mcp` and cannot
+  widen what the agent can see.
 
 The split matters: the agent pod runs with `automountServiceAccountToken: false` and no RBAC, so
 every cluster read goes through `fathom-mcp`. Widening what the agent can see is an RBAC change in
@@ -81,26 +90,31 @@ ollama/        host-side Ollama setup — config.env (all knobs) + setup.sh (app
 agent/         Python agent — src/fathom_agent/, tests/, Dockerfile, helm/
 mcp/           Go MCP server — cmd/, internal/, Dockerfile, helm/
 front/         Go chat UI — cmd/, internal/ (assets embedded), Dockerfile, helm/
+eval/          Python eval harness — src/fathom_eval/ (fixtures + rubrics packaged), helm/
 ```
 
-There is no top-level `helm/`. The charts are `agent/helm`, `mcp/helm` and `front/helm`;
-`mcp/helm` creates the `fathom` namespace and the other two do not, because two releases owning
-one Namespace object collide on install.
+There is no top-level `helm/`. The charts are `agent/helm`, `mcp/helm`, `front/helm` and
+`eval/helm`; `mcp/helm` creates the `fathom` namespace and `agent`/`front` do not, because two
+releases owning one Namespace object collide on install. `eval/helm` creates its own
+`fathom-eval` namespace, which is a different object and so does not collide.
 
-The top-level `Makefile` cuts one version across all three at once (`make release BUMP=patch`).
+The top-level `Makefile` cuts one version across all four at once (`make release BUMP=patch`).
 A component joins it by appending to `COMPONENTS` and `CHARTS` and adding an ordered
 `deploy-<name>` target — ordered because each service's readiness depends on the one before it:
-mcp, then agent, then front.
+mcp, then agent, then front, then eval. `deploy-eval` is the one target that cannot gate on a
+rollout: a CronJob has none, and its PVC stays `Pending` by design under
+`WaitForFirstConsumer`, so waiting on `Bound` would hang on a healthy install. It asserts the
+CronJob's image tag instead.
 
 Build and test: `make check` in any component (`fmt`, `lint`, tests, chart lint).
 
-The three component Makefiles are deliberately uniform: `help build fmt lint test check
+The four component Makefiles are deliberately uniform: `help build fmt lint test check
 image push lint-chart render-chart run-local version clean all` mean the same thing in
 each, so `make -C <component> <target>` works without knowing the language behind it, and
 `make` with no target prints `help`. Anything outside that list is component-specific and
-named so — `run-stdio` in `mcp`, `venv`/`lock`/`lock-check` in `agent`, `test-ui` in
-`front`; the Go components keep `vet` as an alias for `lint`. A new target that
-belongs to all three goes into all three, or it is not part of the shared set.
+named so — `run-stdio` in `mcp`, `venv`/`lock`/`lock-check` in `agent` and `eval`, `test-ui` in
+`front`, `run-judge`/`db-pull` in `eval`; the Go components keep `vet` as an alias for `lint`.
+A new target that belongs to all four goes into all four, or it is not part of the shared set.
 
 ## Telemetry
 
@@ -143,7 +157,7 @@ Prometheus failure path classifies onto the same seven error classes as the Kube
 than inventing a parallel vocabulary — both feed `mcp.tool.errors`, and two vocabularies would
 split one stream into two that cannot be compared.
 
-**Python dependency changes are a two-step.** `agent/Dockerfile` installs `requirements.lock` and
+**Python dependency changes are a two-step, in `agent/` and `eval/` alike.** `agent/Dockerfile` installs `requirements.lock` and
 then `pip install --no-deps .`, so the lock is the only source of what lands in the image. After
 editing `pyproject.toml`, run `make lock` (needs Docker) or the image will build green and die on
 `ImportError` at pod start. `make check` guards this via `lock-check`.
@@ -154,6 +168,15 @@ editing `pyproject.toml`, run `make lock` (needs Docker) or the image will build
 `agent/helm/values.yaml`; `ollama/setup.sh --verify` checks an existing install without changing
 anything. The agent requests the **alias**, not the raw model tag, so swapping base models is a
 config change plus a re-run rather than an application change.
+
+`sudo ollama/setup.sh --judge` installs a **second, CPU-only** Ollama instance
+(`ollama-judge.service`, `CUDA_VISIBLE_DEVICES=""`, bound `0.0.0.0:11435`) serving the
+`fathom-judge` alias for `eval/`. It is a separate unit rather than a second model in the
+existing one because the GPU has 8 GB, the agent's model already fills it, and
+`OLLAMA_MAX_LOADED_MODELS=1` means a second model would evict it. The judge must bind the
+node network, not loopback, because it is dialled from an in-cluster CronJob. Its knobs
+live in the judge block of `ollama/config.env` and must match `eval/helm/values.yaml`
+→ `judge.url` / `judge.model`, the same two-file agreement the agent's endpoint has.
 
 The components have independent lifecycles: the Go module root is `mcp/`, the Python project root is
 `agent/`, each chart versions separately, and the host scripts never run in CI against real

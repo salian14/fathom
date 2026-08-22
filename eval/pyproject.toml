@@ -1,0 +1,47 @@
+[project]
+name = "fathom-eval"
+version = "0.5.1"
+description = "Fathom's evaluation harness: stages known-broken workloads, asks the agent about them, and grades the answers deterministically."
+requires-python = ">=3.12"
+
+dependencies = [
+    # The agent is reached over plain HTTP; the cluster over the official client.
+    "httpx==0.28.1",
+    "kubernetes==36.0.3",
+    "PyYAML==6.0.3",
+    # Telemetry, matching the other components. No FastAPI/gRPC server here --
+    # this is a batch job, so only the SDK and the OTLP exporter are needed.
+    "opentelemetry-sdk==1.44.0",
+    "opentelemetry-exporter-otlp-proto-grpc==1.44.0",
+    "opentelemetry-instrumentation-httpx==0.65b0",
+    "opentelemetry-instrumentation-logging==0.65b0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.0.1",
+    "ruff==0.15.3",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# The fixture YAMLs are data the harness loads at runtime, so they ship inside the
+# package rather than beside it -- the image has no repo checkout to read from.
+[tool.setuptools.package-data]
+fathom_eval = ["fixtures/*.yaml"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E/F pyflakes+pycodestyle, I import sorting, UP pyupgrade, B bugbear.
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
