@@ -139,6 +139,11 @@ Group=ollama
 Restart=always
 RestartSec=3
 Environment="OLLAMA_HOST=${OLLAMA_JUDGE_BIND}"
+# Explicit, not inherited from HOME. Both instances read the same store, which is
+# what keeps the judge free of extra disk cost -- but an instance that resolves the
+# path differently silently starts with an empty model list and 404s every request.
+# Reads are safe to share; never pull from both instances at once.
+Environment="OLLAMA_MODELS=/usr/share/ollama/.ollama/models"
 Environment="OLLAMA_KEEP_ALIVE=${OLLAMA_JUDGE_KEEP_ALIVE:-5m}"
 Environment="OLLAMA_NUM_PARALLEL=1"
 Environment="OLLAMA_MAX_LOADED_MODELS=1"

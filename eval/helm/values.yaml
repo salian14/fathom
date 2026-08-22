@@ -66,8 +66,10 @@ judge:
   # rule the agent follows, so swapping the judge model is a config change plus a
   # re-run rather than an application change.
   model: fathom-judge
-  # Judgements per fixture+question per run. A 31B on CPU takes minutes per judgement,
-  # so judging all 100 results would run for hours; 3 keeps a night's pass bounded.
+  # Judgements per fixture+question per run. Measured at ~96s each on this host, so
+  # 3 per fixture is about 48 minutes a night, where judging all 100 results would be
+  # closer to 2.7 hours. Contested results (deterministic checks disagreeing) are
+  # judged first, so a small sample still lands where a second opinion is worth most.
   # Set to 0 to judge everything.
   sample: 3
   timeout: 900s

@@ -175,12 +175,34 @@ sudo ollama/setup.sh --judge
 That installs `ollama-judge.service` with `CUDA_VISIBLE_DEVICES=""`, bound to
 `0.0.0.0:11435` so the in-cluster CronJob can reach it — `127.0.0.1` would be the pod.
 The model (`gemma4:31b`) is one already on disk; nothing new is pulled, because the model
-store is 83 GB and the filesystem is short of room.
+store is 83 GB and the filesystem is short of room. Both instances share that store —
+the unit pins `OLLAMA_MODELS` explicitly rather than inheriting it, because an instance
+that resolves the path differently comes up with an empty model list and 404s every
+request. Sharing is safe for reads; never pull from both instances at once.
 
-The cost is speed: roughly 1.5–2.5 tok/s, so **minutes per judgement**. Judging all 100
-results would run for hours, so the judge samples 3 per fixture+question by default,
-prioritising results whose deterministic checks disagreed with each other — which is
-exactly where a second opinion is worth having. `--sample 0` judges everything.
+The cost is speed. Measured on this host with the real prompt and `gemma4:31b`:
+
+| | |
+|---|---|
+| prefill | 10.1 tok/s — 68 s for a 663-token prompt |
+| generation | 1.64 tok/s — 28 s for a 45-token verdict |
+| model load | +38 s, once, on the first call after a reload |
+| **steady state** | **~96 s per judgement** |
+
+Prefill is two thirds of the cost, so **prompt length is the main lever** on how long a
+night of judging takes — which is why the rubric is terse and why the prompt carries a
+summary of the tool calls rather than their output. (The `/chat` response does not include
+tool output anyway, only sizes, so the fixture's ground-truth description is what lets the
+judge check an answer against reality.)
+
+At ~96 s each, the default sample of 3 per fixture+question is about **48 minutes** a
+night; judging all 100 results would be closer to **2.7 hours**. The sample prioritises
+results whose deterministic checks disagreed with each other — exactly where a second
+opinion is worth having. `--sample 0` judges everything.
+
+On a spot check of a correct crashloop answer the judge returned
+`{"verdict": "pass", "score": 5}` with a rationale naming the pod, the root cause and the
+log evidence, so the model is capable enough for the job.
 
 It refuses to start while a run is in flight. The three VMs already pin 12 of the host's
 20 threads, and a judge running beside a live evaluation would slow the agent and inflate
@@ -272,7 +294,9 @@ clean all`. Component-specific: `venv`, `lock`, `lock-check`, `run-judge`, `db-p
 ## Known limits
 
 - **A run is ~2 hours** and is serialised on one Ollama instance. If that becomes
-  disruptive, `FATHOM_EVAL_FIXTURES` shards the suite across nights.
+  disruptive, `FATHOM_EVAL_FIXTURES` shards the suite across nights. (That estimate is
+  from the README's own 30–180 s per turn; unlike the judge figures above it has not been
+  measured end to end, so treat the first run as calibration.)
 - **10 samples is thin.** A 7/10 pass rate has roughly a ±25pp 95% interval; treat 10 as
   the per-night floor and pool across nights.
 - **The ceiling sentinel is someone else's string.** `tests/test_langgraph_pin.py` pins
