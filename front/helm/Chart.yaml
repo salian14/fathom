@@ -6,8 +6,8 @@ description: >-
   origin. Holds no Kubernetes credentials and no conversation state.
 type: application
 
-version: 0.5.1
-appVersion: "0.5.1"
+version: 0.5.2
+appVersion: "0.5.2"
 
 keywords:
   - fathom
