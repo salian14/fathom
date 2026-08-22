@@ -113,7 +113,7 @@ image push lint-chart render-chart run-local version clean all` mean the same th
 each, so `make -C <component> <target>` works without knowing the language behind it, and
 `make` with no target prints `help`. Anything outside that list is component-specific and
 named so — `run-stdio` in `mcp`, `venv`/`lock`/`lock-check` in `agent` and `eval`, `test-ui` in
-`front`, `run-judge`/`db-pull` in `eval`; the Go components keep `vet` as an alias for `lint`.
+`front`, `run-judge`/`run-now`/`db-pull` in `eval`; the Go components keep `vet` as an alias for `lint`.
 A new target that belongs to all four goes into all four, or it is not part of the shared set.
 
 ## Telemetry

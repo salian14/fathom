@@ -264,6 +264,19 @@ kubectl -n fathom-eval patch cronjob fathom-eval -p '{"spec":{"suspend":false}}'
 kubectl -n fathom-eval patch cronjob fathom-eval-judge -p '{"spec":{"suspend":false}}'
 ```
 
+To run the real in-cluster job once, without unsuspending anything — `suspend` stops
+the scheduler, not manual creation — fire a Job from the CronJob's own template:
+
+```sh
+make -C eval run-now             # the evaluation
+make -C eval run-now JOB=judge   # the scoring pass
+```
+
+It refuses while a fathom-eval pod is already Running or Pending. `concurrencyPolicy:
+Forbid` covers only Jobs the CronJob controller creates, so nothing in the cluster
+would otherwise stop a hand-made Job landing on top of a live run and colliding on the
+fixture namespaces and the results database.
+
 Locally, against the deployed agent's NodePort:
 
 ```sh
@@ -291,7 +304,8 @@ make -C eval run-judge
 
 `make -C eval <target>` — the shared vocabulary works here as in the other three:
 `help build fmt lint test check image push lint-chart render-chart run-local version
-clean all`. Component-specific: `venv`, `lock`, `lock-check`, `run-judge`, `db-pull`.
+clean all`. Component-specific: `venv`, `lock`, `lock-check`, `run-judge`, `run-now`,
+`db-pull`.
 
 ## Known limits
 
