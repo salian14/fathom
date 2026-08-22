@@ -1,0 +1,63 @@
+# A wiring fault rather than an application fault: the pod is fine, its dependency is
+# absent. The pod never leaves ContainerCreating, and the reason lives only in events.
+name: missing-configmap
+isolation: shared
+order: 40
+description: >-
+  A single Pod named config-app which mounts a ConfigMap named app-settings that does
+  not exist in the namespace. The pod is stuck in ContainerCreating and the kubelet
+  emits repeated FailedMount events reading
+  'configmap "app-settings" not found'. The pod spec itself is otherwise valid.
+
+objectNames: [config-app]
+
+manifests:
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: config-app
+      labels: {app: config-app}
+    spec:
+      restartPolicy: Always
+      priorityClassName: fathom-eval-low
+      volumes:
+        - name: settings
+          configMap:
+            name: app-settings
+      containers:
+        - name: app
+          image: registry.lab:5000/fathom-eval-fixture:1
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep 3600"]
+          volumeMounts:
+            - name: settings
+              mountPath: /etc/app
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+
+ready:
+  timeout: 240s
+  all:
+    - jsonpath: .status.phase
+      op: eq
+      value: Pending
+    - jsonpath: .status.containerStatuses[0].state.waiting.reason
+      op: in
+      value: [ContainerCreating]
+  never:
+    - jsonpath: .status.phase
+      op: eq
+      value: Running
+
+questions:
+  - id: q1
+    text: >-
+      A pod in the {{ namespace }} namespace never finishes starting. What is it waiting
+      for?
+    expect:
+      names: [config-app]
+      namespace: true
+      tools_any: [k8s_describe]
+      keywords_any: ["configmap", "config map", "app-settings", "FailedMount", "not found", "mount"]
+      must_not_claim_mutation: true

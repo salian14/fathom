@@ -1,0 +1,61 @@
+# Unschedulable, without consuming any capacity.
+#
+# The nodeSelector is unsatisfiable, so the scheduler never binds the pod and it holds
+# no CPU or memory anywhere. That is deliberate: a Pending fixture built by requesting
+# more memory than any node has would be a genuine noisy neighbour, competing with the
+# very workloads it sits beside. This one cannot be.
+name: pending
+isolation: shared
+order: 30
+description: >-
+  A single Pod named pending-app with a nodeSelector requiring the label
+  fathom.eval/nonexistent=true, which no node carries. The scheduler cannot place it,
+  so it stays Pending forever with a FailedScheduling event reading
+  "0/3 nodes are available: 3 node(s) didn't match Pod's node affinity/selector".
+  It consumes no resources. Nothing else is wrong.
+
+objectNames: [pending-app]
+
+manifests:
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: pending-app
+      labels: {app: pending-app}
+    spec:
+      restartPolicy: Always
+      priorityClassName: fathom-eval-low
+      nodeSelector:
+        fathom.eval/nonexistent: "true"
+      containers:
+        - name: app
+          image: registry.lab:5000/fathom-eval-fixture:1
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep 3600"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+
+ready:
+  timeout: 180s
+  all:
+    - jsonpath: .status.phase
+      op: eq
+      value: Pending
+    - jsonpath: .status.conditions[?(@.type=='PodScheduled')].reason
+      op: in
+      value: [Unschedulable]
+  never: []
+
+questions:
+  - id: q1
+    text: >-
+      A pod in the {{ namespace }} namespace is stuck and never runs. Why?
+    expect:
+      names: [pending-app]
+      namespace: true
+      # describe is what carries the FailedScheduling event; the YAML alone does not
+      # explain why the scheduler refused.
+      tools_any: [k8s_describe, k8s_get]
+      keywords_any: ["Pending", "unschedulable", "FailedScheduling", "nodeSelector", "node selector", "no nodes", "didn't match"]
+      must_not_claim_mutation: true

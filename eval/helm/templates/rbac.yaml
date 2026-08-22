@@ -1,0 +1,87 @@
+{{- if .Values.rbac.create }}
+{{- /*
+  The harness's write credential -- the only one in this repository.
+
+  fathom-mcp's ClusterRole is read-only (get/list, no watch, no write verbs) and is a
+  safety property of the system under test. Nothing here touches it: the harness has its
+  own ServiceAccount, and widening this grant cannot widen what the agent can see.
+
+  WHAT IS SCOPED, AND WHAT CANNOT BE
+
+  `delete` and `get` on namespaces are pinned by resourceNames to exactly the fixture
+  namespaces this suite declares. That is the tight half.
+
+  `create` on namespaces CANNOT be name-scoped. resourceNames matches an existing
+  object's name, and on a create there is no object yet, so the authorizer has nothing
+  to match -- this is a property of Kubernetes RBAC, not an oversight here. The same is
+  true of `list`, which the leftover sweep needs. So this ServiceAccount can create any
+  namespace, and can list all of them.
+
+  Two things narrow that in practice, and neither is pretended to be a substitute for
+  RBAC:
+
+    1. The harness refuses in code to create or delete anything whose name does not
+       start with `fathom-eval-` (see cluster.guard). That is the same belt-and-braces
+       shape fathom-mcp already uses, where the server enforces allowedNamespaces itself
+       rather than trusting RBAC alone.
+    2. The workload grants below are scoped by KIND, hard. There is no `apps` group at
+       all -- fixtures are bare Pods, which is what lets Deployments, StatefulSets and
+       DaemonSets stay out of the write set entirely -- and no nodes, no
+       persistentvolumes, and nothing under rbac.authorization.k8s.io.
+
+  On secrets: create and delete, deliberately WITHOUT get/list/watch. The harness plants
+  a canary value in the secret-bait fixture, so it must be able to write one; it has no
+  business reading any secret in the cluster, including its own.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "fathom-eval.fullname" . }}
+  labels:
+    {{- include "fathom-eval.labels" . | nindent 4 }}
+rules:
+  # Cluster-wide, because neither verb can be restricted by name. See above.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "list"]
+  # The tight half: only the declared fixture namespaces may be read or destroyed.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames:
+      {{- range .Values.rbac.fixtureNamespaces }}
+      - {{ . | quote }}
+      {{- end }}
+    verbs: ["get", "delete"]
+  # The fixture workloads themselves. Bare Pods only -- no controllers.
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps"]
+    verbs: ["create", "delete", "get", "list"]
+  # Write-only on secrets: plant the canary, never read one.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete"]
+  # Readiness predicates poll pod status and events.
+  - apiGroups: [""]
+    resources: ["events", "pods/status"]
+    verbs: ["get", "list"]
+  # Fixture pods reference the low-priority class, so the ServiceAccount must be able
+  # to resolve it at admission time.
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "fathom-eval.fullname" . }}
+  labels:
+    {{- include "fathom-eval.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "fathom-eval.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "fathom-eval.serviceAccountName" . }}
+    namespace: {{ include "fathom-eval.namespace" . }}
+{{- end }}

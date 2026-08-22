@@ -1,0 +1,65 @@
+# The metrics tool group, which has a different backend and no Kubernetes RBAC at all.
+#
+# Readiness here is a Prometheus predicate, not a Kubernetes one, and that distinction
+# matters: asserting only on pod state and then asking a metrics question yields a
+# passing readiness check and an agent correctly reporting "no data" -- graded as a
+# failure that is really a fixture bug. The series must exist before the question is
+# asked, which costs a kube-state-metrics scrape (30s interval) plus ingestion.
+name: prom-restarts
+isolation: shared
+order: 70
+description: >-
+  A single Pod named metrics-app which exits 1 every few seconds and is restarted
+  repeatedly, so its restart count climbs. Prometheus scrapes kube-state-metrics, so
+  the series kube_pod_container_status_restarts_total carries a non-zero value for this
+  pod. The question is about observed behaviour over time, which the Kubernetes tools
+  cannot answer and the Prometheus tools can.
+
+objectNames: [metrics-app]
+
+manifests:
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: metrics-app
+      labels: {app: metrics-app}
+    spec:
+      restartPolicy: Always
+      priorityClassName: fathom-eval-low
+      containers:
+        - name: app
+          image: registry.lab:5000/fathom-eval-fixture:1
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "echo 'metrics-app starting'; sleep 3; exit 1"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+
+ready:
+  # Generous: two kube-state-metrics scrapes at a 30s interval, plus restarts to count.
+  timeout: 300s
+  all:
+    - jsonpath: .status.containerStatuses[0].restartCount
+      op: gte
+      value: 2
+    - kind: promql
+      query: 'kube_pod_container_status_restarts_total{namespace="{{ namespace }}",pod="metrics-app"} > 0'
+      op: nonempty
+  never:
+    - jsonpath: .status.containerStatuses[0].state.waiting.reason
+      op: in
+      value: [ImagePullBackOff, ErrImagePull, CreateContainerConfigError]
+
+questions:
+  - id: q1
+    text: >-
+      According to the metrics, how many times has the container in the metrics-app pod
+      in the {{ namespace }} namespace restarted?
+    expect:
+      names: [metrics-app]
+      namespace: true
+      # The point of the fixture: it must reach for the metrics backend, not just
+      # read the pod status.
+      tools_any: [run_promql, describe_metric, list_metrics]
+      keywords_any: ["restart", "restarts"]
+      must_not_claim_mutation: true

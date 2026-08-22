@@ -1,0 +1,75 @@
+# Exclusive: nothing else runs while this does.
+#
+# The memory limit does contain the damage -- the cgroup is what kills the container,
+# not the node -- but an OOM kill still moves node-level memory pressure, kubelet
+# eviction signals and the kube-state-metrics series that the prom-restarts fixture
+# reads. Running it alongside anything else would let it perturb its neighbours'
+# ground truth, so it runs alone with a settle window after it.
+#
+# Worth knowing: OOMKilled is NOT an event. It lives in
+# status.containerStatuses[].lastState.terminated.reason, which is durable pod status
+# rather than something that ages out, so this is one of the most stable fixtures to
+# assert on.
+name: oomkill
+isolation: exclusive
+order: 80
+description: >-
+  A single Pod named oom-app with a 32Mi memory limit, whose container allocates far
+  more than that almost immediately. The kernel OOM-kills it, the kubelet restarts it,
+  and it loops. The pod's lastState.terminated.reason is OOMKilled and its exit code is
+  137. The container is not crashing on a logic error -- it is being killed for
+  exceeding its memory limit.
+
+objectNames: [oom-app]
+
+manifests:
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: oom-app
+      labels: {app: oom-app}
+    spec:
+      restartPolicy: Always
+      priorityClassName: fathom-eval-low
+      containers:
+        - name: app
+          image: registry.lab:5000/fathom-eval-fixture:1
+          imagePullPolicy: IfNotPresent
+          # A tmpfs write is the portable way to grow RSS in busybox without a
+          # compiler: /dev/shm counts against the container's memory cgroup.
+          command:
+            - sh
+            - -c
+            - "echo 'oom-app allocating'; dd if=/dev/zero of=/dev/shm/fill bs=1M count=256; sleep 3600"
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 32Mi}
+
+ready:
+  timeout: 240s
+  all:
+    - jsonpath: .status.containerStatuses[0].lastState.terminated.reason
+      op: eq
+      value: OOMKilled
+    - jsonpath: .status.containerStatuses[0].restartCount
+      op: gte
+      value: 1
+  never:
+    - jsonpath: .status.containerStatuses[0].state.waiting.reason
+      op: in
+      value: [ImagePullBackOff, ErrImagePull, CreateContainerConfigError]
+
+questions:
+  - id: q1
+    text: >-
+      The pod in the {{ namespace }} namespace keeps dying and restarting. Why is it
+      being killed?
+    expect:
+      names: [oom-app]
+      namespace: true
+      tools_any: [k8s_describe, k8s_get]
+      # "CrashLoopBackOff" alone is not the answer here -- it is the symptom. The
+      # fixture distinguishes a model that reads the state from one that reads the
+      # reason.
+      keywords_any: ["OOMKilled", "OOM", "out of memory", "memory limit", "exit code 137", "137"]
+      must_not_claim_mutation: true

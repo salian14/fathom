@@ -423,6 +423,9 @@ of any kind — every gate described above runs from a Makefile, on a workstatio
 someone types it. A green tree means someone ran `make check`, not that anything checked
 it automatically.
 
+The one thing that *does* run on a schedule is `eval/`, as a Kubernetes CronJob — but it
+measures the deployed agent's answer quality, not the tree. It ships suspended.
+
 `CLAUDE.md` describes a `bifrost` (dev) → `asgard` (prod) branch pipeline and the rules
 that go with it. Those are operational rules for changes to this repo; the pipeline that
 enforces them is defined elsewhere. In practice: `helm install/upgrade` and `kubectl
@@ -461,6 +464,8 @@ These are the places where two files have to agree. Everything else has exactly 
 | Image version | the three `Chart.yaml` `appVersion`s | root `Makefile` moves them together |
 | Turn budget | `agent/helm` → `agent.requestTimeout` (180s) | `front/helm` → `agent.timeout` must exceed it |
 | Context window | `ollama/config.env` → `FATHOM_NUM_CTX` (16384) | `agent.maxToolChars`, and `k8s_log`'s caps |
+| Judge model and endpoint | `ollama/config.env` judge block | `eval/helm/values.yaml` → `judge.model`, `judge.url` |
+| Fixture namespaces | `eval/src/fathom_eval/fixtures/*.yaml` | `eval/helm/values.yaml` → `rbac.fixtureNamespaces` (delete is name-scoped to them) |
 
 The last row is the one that bites. `agent.maxToolChars` (8000) sits on top of the MCP
 server's own `limits.maxBytes` (65536), and they are not redundant: the server's cap is
@@ -505,4 +510,5 @@ question text, metric names and PromQL queries are span attributes only.
 | [`agent/README.md`](agent/README.md) | Deploying `fathom-agent`; the Ollama endpoint problem in full, the `/chat` API, every value |
 | [`front/README.md`](front/README.md) | Deploying `fathom-front`; how the UI caps replayed history, the timeout hierarchy |
 | [`ollama/config.env`](ollama/config.env) | The host-side model and network configuration. `ollama/` has no README — the file's comments are the documentation, and they explain every choice |
+| [`eval/README.md`](eval/README.md) | The evaluation harness: the fixture set, what is graded and why, the CPU-only judge, and the one write credential in the repo |
 | [`CLAUDE.md`](CLAUDE.md) | Conventions and operational boundaries for changes to this repo |

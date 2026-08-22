@@ -1,0 +1,43 @@
+fathom-eval {{ .Chart.AppVersion }} installed into namespace {{ include "fathom-eval.namespace" . }}.
+
+  run schedule:    {{ .Values.cronjob.schedule }}
+  judge schedule:  {{ .Values.cronjob.judgeSchedule }}
+  agent under test {{ .Values.eval.agentUrl }}
+  judge model      {{ .Values.judge.model }} at {{ .Values.judge.url }}
+  iterations       {{ .Values.eval.iterations }} per question, per fixture
+
+{{ if .Values.cronjob.suspend }}
+BOTH CRONJOBS ARE SUSPENDED. That is the shipped default, so that deploying a release
+does not immediately start a multi-hour evaluation. Start them when you mean to:
+
+  kubectl -n {{ include "fathom-eval.namespace" . }} patch cronjob {{ include "fathom-eval.fullname" . }} \
+    -p '{"spec":{"suspend":false}}'
+  kubectl -n {{ include "fathom-eval.namespace" . }} patch cronjob {{ include "fathom-eval.fullname" . }}-judge \
+    -p '{"spec":{"suspend":false}}'
+{{ end }}
+Before the first run, two things must be true or every fixture fails identically:
+
+  1. The fixture image exists in the registry:
+       registry.lab:5000/fathom-eval-fixture:1
+     Any small image with a shell will do; see eval/README.md.
+
+  2. The CPU-only judge Ollama is listening on {{ .Values.judge.url }}.
+     It must bind the node network, not 127.0.0.1, or this namespace cannot reach it:
+       sudo ollama/setup.sh --judge
+
+Trigger a run by hand without waiting for the schedule:
+
+  kubectl -n {{ include "fathom-eval.namespace" . }} create job --from=cronjob/{{ include "fathom-eval.fullname" . }} eval-manual-1
+
+Read the results (the PVC is node-pinned, so copy it out rather than hunting for it):
+
+  make -C eval db-pull
+  sqlite3 results.db "select fixture, outcome, count(*) from results group by 1,2"
+
+{{ if .Values.persistence.enabled }}
+The results PVC carries helm.sh/resource-policy: keep, so `helm uninstall` will NOT
+delete your history. Removing it is a deliberate `kubectl delete pvc`.
+{{ end }}
+WRITE ACCESS: this is the only component in Fathom whose ServiceAccount can create and
+delete objects. It cannot read Secrets (create/delete only) and holds nothing under the
+apps group. fathom-mcp's read-only ClusterRole is untouched by this chart.

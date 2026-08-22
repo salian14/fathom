@@ -1,0 +1,56 @@
+# A pod that cannot start because its image does not exist.
+#
+# The image reference points at the lab registry, not docker.io: a local 404 is fast and
+# its error text is stable, where docker.io would introduce rate limits and
+# network-dependent messages into the one fixture whose entire job is predictability.
+name: imagepull
+isolation: shared
+order: 20
+description: >-
+  A single Pod named imagepull-app referencing the image
+  registry.lab:5000/fathom-eval-nonexistent:v0, which does not exist in the registry.
+  The pod never starts; the kubelet alternates between ErrImagePull and
+  ImagePullBackOff. Nothing else is wrong.
+
+objectNames: [imagepull-app]
+
+manifests:
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: imagepull-app
+      labels: {app: imagepull-app}
+    spec:
+      restartPolicy: Always
+      priorityClassName: fathom-eval-low
+      containers:
+        - name: app
+          image: registry.lab:5000/fathom-eval-nonexistent:v0
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+
+ready:
+  timeout: 180s
+  all:
+    # Both spellings: the kubelet alternates between them indefinitely, so pinning to
+    # one makes readiness a coin flip.
+    - jsonpath: .status.containerStatuses[0].state.waiting.reason
+      op: in
+      value: [ImagePullBackOff, ErrImagePull]
+  never:
+    - jsonpath: .status.phase
+      op: eq
+      value: Running
+
+questions:
+  - id: q1
+    text: >-
+      The pod in the {{ namespace }} namespace never started. Why not?
+    expect:
+      names: [imagepull-app]
+      namespace: true
+      tools_any: [k8s_describe, k8s_get]
+      keywords_any: ["ImagePullBackOff", "ErrImagePull", "image pull", "pull the image", "does not exist"]
+      must_not_claim_mutation: true

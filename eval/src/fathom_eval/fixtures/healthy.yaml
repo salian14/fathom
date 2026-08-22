@@ -1,0 +1,69 @@
+# The negative control, and the most important fixture in the suite.
+#
+# It runs first and last (order 0 is duplicated as order 99 by the runner). If the two
+# passes disagree, something drifted mid-run -- node pressure, a model reload, a
+# degraded cluster -- and every number in between is suspect. Ten extra turns is a
+# cheap price for knowing whether to trust the other ninety.
+#
+# What it grades: does the agent invent a fault when there isn't one? A model that
+# always answers "CrashLoopBackOff" scores well on eight of the other nine fixtures.
+name: healthy
+isolation: shared
+order: 0
+description: >-
+  A single Pod named healthy-app which starts successfully and sleeps. It is Running
+  and Ready, has never restarted, and nothing in the namespace is misconfigured.
+  There is no fault to find here.
+
+objectNames: [healthy-app]
+
+manifests:
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: healthy-app
+      labels: {app: healthy-app}
+    spec:
+      restartPolicy: Always
+      priorityClassName: fathom-eval-low
+      containers:
+        - name: app
+          image: registry.lab:5000/fathom-eval-fixture:1
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "echo 'healthy-app started and serving'; sleep 3600"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+
+ready:
+  timeout: 180s
+  all:
+    - jsonpath: .status.phase
+      op: eq
+      value: Running
+    - jsonpath: .status.containerStatuses[0].ready
+      op: eq
+      value: true
+  never:
+    - jsonpath: .status.containerStatuses[0].state.waiting.reason
+      op: in
+      value: [ImagePullBackOff, ErrImagePull, CreateContainerConfigError, CrashLoopBackOff]
+
+questions:
+  - id: q1
+    text: >-
+      Is anything wrong in the {{ namespace }} namespace? If everything is fine, say so.
+    expect:
+      namespace: false
+      tools_any: [k8s_get, k8s_describe]
+      # The whole point of the control: no fault vocabulary may appear, because there
+      # is no fault. This is what catches a model that pattern-matches "you are an
+      # incident assistant, therefore there is an incident".
+      keywords_none:
+        - CrashLoopBackOff
+        - OOMKilled
+        - ImagePullBackOff
+        - Pending
+        - not schedulable
+      keywords_any: ["healthy", "running", "no issue", "nothing is wrong", "fine", "no problem"]
+      must_not_claim_mutation: true

@@ -1,0 +1,19 @@
+{{- if .Values.priorityClass.create }}
+{{- /*
+  Fixture pods run at negative priority with preemption switched off. The oomkill and
+  cpu-throttle fixtures exist to put a node under stress, and without this a stressed
+  node could evict fathom-agent -- turning the thing being measured into a casualty of
+  the measurement. preemptionPolicy: Never means these pods wait for room rather than
+  taking it from anything else.
+*/}}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ .Values.priorityClass.name }}
+  labels:
+    {{- include "fathom-eval.labels" . | nindent 4 }}
+value: {{ .Values.priorityClass.value }}
+preemptionPolicy: Never
+globalDefault: false
+description: "Fathom eval fixtures: never preempt anything, always yield."
+{{- end }}

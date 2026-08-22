@@ -1,0 +1,102 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "fathom-eval.fullname" . }}
+  namespace: {{ include "fathom-eval.namespace" . }}
+  labels:
+    {{- include "fathom-eval.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronjob.schedule | quote }}
+  {{- /*
+    Shipped suspended. `make deploy-eval` runs at the tail of a release, and an
+    unsuspended CronJob would start a multi-hour evaluation against a cluster whose
+    three services finished rolling seconds earlier.
+  */}}
+  suspend: {{ .Values.cronjob.suspend }}
+  {{- /*
+    Forbid, not Replace: a second run would try to create fixture namespaces the first
+    one still owns, and both would then fight over the same SQLite file.
+  */}}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: {{ .Values.cronjob.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ .Values.cronjob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.cronjob.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      {{- /*
+        A retry would re-stage every fixture and double-count the night's samples, so a
+        failed run stays failed and the next scheduled one is the retry.
+      */}}
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ .Values.cronjob.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "fathom-eval.selectorLabels" . | nindent 12 }}
+            {{- with .Values.podLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          annotations:
+            checksum/config: {{ printf "%s%s%s" (toYaml .Values.eval) (toYaml .Values.judge) (toYaml .Values.otel) | sha256sum }}
+            {{- with .Values.podAnnotations }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "fathom-eval.serviceAccountName" . }}
+          {{- /* Namespace teardown must be able to finish before the pod is killed. */}}
+          terminationGracePeriodSeconds: {{ .Values.cronjob.terminationGracePeriodSeconds }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: fathom-eval
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              args:
+                - run
+                {{- /*
+                  The harness's own soft deadline, below the Job's hard
+                  activeDeadlineSeconds, so it stops between turns and tears its
+                  fixtures down rather than being SIGKILLed with a namespace full of
+                  deliberately broken pods still standing.
+                */}}
+                - --deadline
+                - {{ .Values.cronjob.softDeadlineSeconds | quote }}
+              env:
+                {{- include "fathom-eval.env" . | nindent 16 }}
+              volumeMounts:
+                - name: results
+                  mountPath: {{ dir .Values.eval.dbPath }}
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+          volumes:
+            - name: results
+              {{- if .Values.persistence.enabled }}
+              persistentVolumeClaim:
+                claimName: {{ include "fathom-eval.fullname" . }}
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+            # readOnlyRootFilesystem is on, and HOME is /tmp.
+            - name: tmp
+              emptyDir: {}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}

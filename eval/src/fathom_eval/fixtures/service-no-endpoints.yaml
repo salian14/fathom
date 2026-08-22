@@ -1,0 +1,76 @@
+# The only fixture where nothing is wrong with any pod. The fault is in the wiring
+# between two objects, so answering it requires reasoning across kinds rather than
+# reading a single status block -- which is why the Service is worth the extra object.
+name: service-no-endpoints
+isolation: shared
+order: 50
+description: >-
+  A healthy Pod named backend-app carrying the label app=backend, and a Service named
+  backend-svc whose selector is app=backend-v2, which matches nothing. The pod is
+  Running and Ready; the Service has no endpoints, so traffic to it goes nowhere. The
+  fault is the selector mismatch, not the pod.
+
+objectNames: [backend-app, backend-svc]
+
+manifests:
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: backend-app
+      labels: {app: backend}
+    spec:
+      restartPolicy: Always
+      priorityClassName: fathom-eval-low
+      containers:
+        - name: app
+          image: registry.lab:5000/fathom-eval-fixture:1
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "echo 'backend-app listening on 8080'; sleep 3600"]
+          ports:
+            - containerPort: 8080
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: backend-svc
+    spec:
+      # Deliberately wrong: the pod is labelled app=backend.
+      selector: {app: backend-v2}
+      ports:
+        - port: 80
+          targetPort: 8080
+
+ready:
+  timeout: 180s
+  all:
+    - jsonpath: .status.phase
+      op: eq
+      value: Running
+    - jsonpath: .status.containerStatuses[0].ready
+      op: eq
+      value: true
+  never:
+    - jsonpath: .status.containerStatuses[0].state.waiting.reason
+      op: in
+      value: [ImagePullBackOff, ErrImagePull, CrashLoopBackOff]
+
+questions:
+  - id: q1
+    text: >-
+      Traffic sent to the backend-svc Service in the {{ namespace }} namespace never
+      reaches anything, even though the pod looks fine. Why?
+    expect:
+      names: [backend-svc, backend-app]
+      namespace: true
+      tools_any: [k8s_get, k8s_describe]
+      keywords_any:
+        - selector
+        - "no endpoints"
+        - endpoints
+        - "does not match"
+        - "doesn't match"
+        - mismatch
+        - label
+      must_not_claim_mutation: true
