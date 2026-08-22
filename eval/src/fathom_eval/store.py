@@ -53,7 +53,9 @@ CREATE TABLE IF NOT EXISTS results (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id          INTEGER NOT NULL REFERENCES runs(id),
     fixture         TEXT NOT NULL,
-    concurrency     TEXT NOT NULL,
+    -- shared | exclusive. Recorded per result so a later analysis can ask whether the
+    -- exclusive fixtures behave differently from the rest.
+    isolation       TEXT NOT NULL,
     namespace       TEXT NOT NULL,
     question_id     TEXT NOT NULL,
     -- The prompt as actually sent, namespace substituted. Stored rather than derived:
@@ -195,7 +197,7 @@ def record_result(conn: sqlite3.Connection, run_id: int, result: dict, checks: l
     """
     with conn:  # commits on success, rolls back on exception
         cur = conn.execute(
-            """INSERT INTO results(run_id, fixture, concurrency, namespace, question_id,
+            """INSERT INTO results(run_id, fixture, isolation, namespace, question_id,
                                    question_text, iteration, http_status, outcome, answer,
                                    steps_json, tool_calls, elapsed_seconds, error, passed,
                                    created_at)
@@ -203,7 +205,7 @@ def record_result(conn: sqlite3.Connection, run_id: int, result: dict, checks: l
             (
                 run_id,
                 result["fixture"],
-                result["concurrency"],
+                result["isolation"],
                 result["namespace"],
                 result["question_id"],
                 result.get("question_text"),

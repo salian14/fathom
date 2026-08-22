@@ -187,7 +187,7 @@ def _run_fixture(
                 run_id,
                 {
                     "fixture": fixture.name,
-                    "concurrency": fixture.isolation,
+                    "isolation": fixture.isolation,
                     "namespace": namespace,
                     "question_id": "-",
                     "iteration": 0,
@@ -271,7 +271,7 @@ def _one_turn(
         run_id,
         {
             "fixture": fixture.name,
-            "concurrency": fixture.isolation,
+            "isolation": fixture.isolation,
             "namespace": namespace,
             "question_id": question.id,
             "question_text": text,

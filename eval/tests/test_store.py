@@ -19,7 +19,7 @@ def conn(tmp_path):
 def a_result(**over):
     base = {
         "fixture": "crashloop",
-        "concurrency": "shared",
+        "isolation": "shared",
         "namespace": "fathom-eval-crashloop",
         "question_id": "q1",
         "question_text": "why?",
