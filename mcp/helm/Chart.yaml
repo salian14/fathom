@@ -7,8 +7,8 @@ description: >-
   Ships the ServiceAccount and RBAC that scope what the agent can see.
 type: application
 
-version: 0.5.1
-appVersion: "0.5.1"
+version: 0.5.4
+appVersion: "0.5.4"
 
 keywords:
   - fathom

@@ -60,7 +60,8 @@ questions:
   - id: q1
     text: >-
       Traffic sent to the backend-svc Service in the {{ namespace }} namespace never
-      reaches anything, even though the pod looks fine. Why?
+      reaches anything, even though the pod looks fine. Why, and what should I do to
+      fix it?
     expect:
       names: [backend-svc, backend-app]
       namespace: true
@@ -74,3 +75,11 @@ questions:
         - mismatch
         - label
       must_not_claim_mutation: true
+      # The fault is the Service's selector, so the fix is aimed at the Service. A
+      # model that recommends restarting or recreating the pod has diagnosed the
+      # wrong object -- the pod is healthy and always was.
+      remediation:
+        required: true
+        any: ["selector", "label", "backend-v2", "match"]
+        none: ["restart the pod", "delete the pod", "memory limit", "image tag"]
+        target_any: [backend-svc]

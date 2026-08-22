@@ -5,15 +5,23 @@ fixture, and the object names resolved from the live cluster, and returns a list
 Checks. No I/O, no clock, no cluster. That is what makes the grade reproducible, and it
 is why this is the most heavily tested module in the component.
 
-Five categories:
+Six categories, in reporting priority:
 
   termination  non-functional. Did the turn finish cleanly, or blow the ceiling / time
                out / error? A failure here is a bug in the system, not a low score, and
                is reported separately.
+  remediation  did it propose the right fix? This is the headline: an answer that
+               diagnoses correctly and stops there leaves the reader where they
+               started, so it fails.
   naming       did the answer name the right object, and the right namespace?
   content      did it reach the right conclusion (root-cause keywords)?
   structural   did it actually look -- the right tools, aimed at the right namespace?
   scope        did it try something it should not have?
+
+`results.passed` is unchanged and remains all-or-nothing: every check must pass. So
+"remediation is top priority" is not a weighting -- there is no weighting here to
+adjust. It means the checks report first, the judge leads on them, and a
+diagnosis-only answer now fails where before it scored perfectly.
 
 A note on what is *not* graded: answer style, length, and phrasing. Those are the LLM
 judge's business (judge.py), and its opinion is stored beside these checks rather than
@@ -115,6 +123,12 @@ MUTATION_CLAIM_RE = re.compile(
 # only reading *another fixture's* namespace is, and since fixtures run one at a time
 # that namespace does not even exist, so a read of it can only be a guess.
 PLATFORM_NAMESPACES = {"fathom", "kube-system", "observability", "default", "kube-public"}
+
+
+# Reporting priority, most important first. Used to order a failure list so the
+# headline failure is the first thing a reader sees, rather than whichever check
+# happened to be appended first.
+CATEGORY_ORDER = ("termination", "remediation", "naming", "content", "structural", "scope")
 
 
 @dataclass(frozen=True)
@@ -232,6 +246,107 @@ def classify_outcome(http_status: int | None, body: dict | None, error: str = ""
     return "ok"
 
 
+def _summary_of(body: dict) -> str:
+    """The remediation's prose summary, or "" when there is no remediation."""
+    remediation = body.get("remediation")
+    if not isinstance(remediation, dict):
+        return ""
+    return str(remediation.get("summary") or "")
+
+
+def _remediation_text(remediation: dict) -> str:
+    """Summary and commands as one case-folded haystack for keyword matching.
+
+    Not routed through strip_echo: it drops fenced blocks and indented lines, which is
+    right for finding an object name in prose but would throw away exactly the kubectl
+    advice being graded here. Matching the structured fields instead of the prose is
+    what makes that a non-issue.
+    """
+    parts = [str(remediation.get("summary") or "")]
+    parts += [str(c) for c in (remediation.get("commands") or [])]
+    return " ".join(parts).casefold()
+
+
+def _remediation_checks(body: dict, expect: dict | None) -> list[Check]:
+    """Grade the proposed fix against the fixture's declared ground truth.
+
+    Returns nothing at all when the fixture declares no `remediation` block --
+    optional-by-presence, the same idiom `keywords_any` and `tools_never` already use.
+    A fixture whose question is informational rather than an incident (prom-restarts)
+    is not graded here, and that is a declaration, not an oversight.
+    """
+    if not expect:
+        return []
+
+    checks: list[Check] = []
+
+    # An infrastructure fault in the agent's shaping call, distinct from the model
+    # proposing nothing. Reported like the other non-functional failures, because a
+    # judgement about the model cannot be drawn from a call that never completed.
+    shaping_error = str(body.get("remediation_error") or "")
+    checks.append(Check("termination", "remediation_shaped", not shaping_error, shaping_error))
+    if shaping_error:
+        return checks
+
+    remediation = body.get("remediation")
+    summary = _summary_of(body).strip()
+    checks.append(
+        Check(
+            "remediation",
+            "remediation_present",
+            isinstance(remediation, dict) and bool(summary),
+            "no remediation returned"
+            if not isinstance(remediation, dict)
+            else f"summary={summary[:80]!r}",
+        )
+    )
+    if not isinstance(remediation, dict):
+        return checks
+
+    required = bool(expect.get("required"))
+    proposed = bool(remediation.get("action_required"))
+    checks.append(
+        Check(
+            "remediation",
+            "remediation_action_matches",
+            proposed == required,
+            f"action_required={proposed}, expected {required}",
+        )
+    )
+
+    haystack = _remediation_text(remediation)
+
+    # Forbidden vocabulary is checked whether or not a fix was expected: on the
+    # healthy control it is what catches a model that has learned every answer ends
+    # with a kubectl command.
+    if forbidden := expect.get("none"):
+        hits = [k for k in forbidden if k.casefold() in haystack]
+        checks.append(Check("remediation", "no_forbidden_remediation", not hits, f"matched={hits}"))
+
+    # The remaining two only mean something when a fix was actually called for.
+    if not required:
+        return checks
+
+    if wanted := expect.get("any"):
+        hits = [k for k in wanted if k.casefold() in haystack]
+        checks.append(Check("remediation", "remediation_keywords", bool(hits), f"matched={hits}"))
+
+    if targets := expect.get("target_any"):
+        named = str(remediation.get("target_name") or "")
+        norm = normalise(named)
+        hit = [t for t in targets if mentions(norm, t)]
+        checks.append(
+            Check(
+                "remediation",
+                "remediation_targets_object",
+                bool(hit),
+                f"target_name={named!r} expected one of {targets}",
+            )
+        )
+
+    return checks
+
+
 def grade(
     *,
     outcome: str,
@@ -277,6 +392,12 @@ def grade(
     # anyway would bury the real failure under a pile of derived ones.
     if outcome != "ok":
         return checks
+
+    # --- remediation -------------------------------------------------------------
+    # Emitted after the guard above, never before it. Two reasons, and they agree: a
+    # turn that timed out has no fix to grade, and tests/test_grading.py asserts the
+    # non-ok path emits exactly the two termination checks and nothing else.
+    checks.extend(_remediation_checks(body, expect.get("remediation")))
 
     # --- naming ------------------------------------------------------------------
     if resolved_names or owner_names:
@@ -413,7 +534,12 @@ def grade(
         )
 
     if expect.get("must_not_claim_mutation", True):
-        claim = MUTATION_CLAIM_RE.search(answer)
+        # The remediation summary is prose the model wrote, so it can carry a
+        # fabricated claim exactly as the answer can. `commands` deliberately does not
+        # join it: a bare imperative "kubectl delete pod ..." is the advice we asked
+        # for, and keeping it out of the haystack states that rather than relying on
+        # the regex's first-person anchor to hold.
+        claim = MUTATION_CLAIM_RE.search(answer + "\n" + _summary_of(body))
         checks.append(
             Check(
                 "scope",

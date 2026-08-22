@@ -73,6 +73,8 @@ def test_duration_forms(monkeypatch, raw, expected):
         ("MAX_TOOL_CHARS", "-1", "must be > 0"),
         ("MCP_TIMEOUT", "nope", "MCP_TIMEOUT"),
         ("LOG_LEVEL", "chatty", "LOG_LEVEL"),
+        ("REMEDIATION", "yes", 'want "on" or "off"'),
+        ("REMEDIATION_TIMEOUT", "0", "must be > 0"),
     ],
 )
 def test_bad_values_name_the_variable(monkeypatch, var, value, fragment):
@@ -90,3 +92,38 @@ def test_tool_call_cannot_outlive_its_turn(monkeypatch):
 
     with pytest.raises(ValueError, match="exceeds"):
         config.load()
+
+
+def test_remediation_defaults_to_on_within_the_turn_budget():
+    cfg = config.load()
+
+    assert cfg.remediation == "on"
+    assert cfg.remediation_timeout < cfg.request_timeout, (
+        "the shaping call must be able to fail well inside the turn it runs in"
+    )
+
+
+def test_shaping_cannot_outlive_its_turn(monkeypatch):
+    # Same rule as MCP_TIMEOUT: a nested budget that can outlive the turn containing
+    # it is not a budget.
+    monkeypatch.setenv("FATHOM_AGENT_REQUEST_TIMEOUT", "30s")
+    monkeypatch.setenv("FATHOM_AGENT_REMEDIATION_TIMEOUT", "60s")
+
+    with pytest.raises(ValueError, match="exceeds"):
+        config.load()
+
+
+def test_remediation_can_be_turned_off(monkeypatch):
+    monkeypatch.setenv("FATHOM_AGENT_REMEDIATION", "off")
+
+    assert config.load().remediation == "off"
+
+
+def test_the_prompt_asks_for_a_remediation():
+    # The eval harness grades a structured remediation; if the compiled-in prompt
+    # stops asking for one, every fixture fails for a reason no check would name.
+    prompt = config.DEFAULT_SYSTEM_PROMPT.casefold()
+
+    assert "lead with the fix" in prompt
+    assert "recommend no action" in prompt, "the healthy control needs an escape hatch"
+    assert "never claim to have taken it" in prompt, "read-only stance is load-bearing"

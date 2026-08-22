@@ -54,10 +54,18 @@ questions:
   - id: q1
     text: >-
       A pod in the {{ namespace }} namespace never finishes starting. What is it waiting
-      for?
+      for, and what should I do to fix it?
     expect:
       names: [config-app]
       namespace: true
       tools_any: [k8s_describe]
       keywords_any: ["configmap", "config map", "app-settings", "FailedMount", "not found", "mount"]
       must_not_claim_mutation: true
+      # Note the target may legitimately be the absent ConfigMap rather than the pod
+      # waiting on it -- creating app-settings and dropping the volume are both
+      # correct fixes, aimed at different objects.
+      remediation:
+        required: true
+        any: ["configmap", "config map", "app-settings", "create", "volume", "mount"]
+        none: ["memory limit", "nodeSelector", "image tag", "restart the node"]
+        target_any: [config-app, app-settings]

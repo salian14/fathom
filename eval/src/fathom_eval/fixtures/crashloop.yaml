@@ -55,10 +55,18 @@ questions:
   - id: q1
     text: >-
       A pod in the {{ namespace }} namespace will not stay up. What is wrong with it,
-      and what is the evidence?
+      what is the evidence, and what should I do to fix it?
     expect:
       names: [crashloop-app]
       namespace: true
       tools_any: [k8s_describe, k8s_log, k8s_get]
       keywords_any: ["CrashLoopBackOff", "crash loop", "crashloop", "exit code 1", "exited with 1"]
       must_not_claim_mutation: true
+      # The fix is the unreachable dependency the container dies on, or the command
+      # that assumes it. Not the restart policy: restarting is what the kubelet is
+      # already doing ten times over.
+      remediation:
+        required: true
+        any: ["db.internal", "database", "connectivity", "dependency", "command", "config"]
+        none: ["increase the memory limit", "raise the memory limit", "nodeSelector", "image tag"]
+        target_any: [crashloop-app]

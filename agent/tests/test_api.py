@@ -7,12 +7,15 @@ is no fake Ollama and no fake MCP server -- exercising those is what
 
 from __future__ import annotations
 
+import dataclasses
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from fathom_agent import api, mcp_client
-from fathom_agent.agent import build_messages, summarise
+from fathom_agent.agent import build_messages, shape_remediation, summarise
 from fathom_agent.config import load
 
 
@@ -70,6 +73,7 @@ def test_chat_returns_the_answer_and_the_tool_trace(client, monkeypatch):
 
     monkeypatch.setattr(api, "build_graph", lambda cfg, model, tools: FakeGraph())
     monkeypatch.setattr(api, "tool_session", _fake_session)
+    _stub_shaper(client, {"action_required": False, "summary": "nothing to do"})
 
     body = client.post("/chat", json={"question": "what is running?"}).json()
 
@@ -88,6 +92,153 @@ def _fake_session(cfg, mcp):
         yield []
 
     return session()
+
+
+# --- remediation ---------------------------------------------------------------
+
+
+class _Shaper:
+    """Stands in for the second, tool-free model call."""
+
+    def __init__(self, reply):
+        self._reply = reply
+        self.calls = 0
+
+    async def ainvoke(self, messages):
+        self.calls += 1
+        if isinstance(self._reply, Exception):
+            raise self._reply
+        return AIMessage(self._reply)
+
+
+def _stub_shaper(client, reply):
+    payload = reply if isinstance(reply, (str, Exception)) else json.dumps(reply)
+    shaper = _Shaper(payload)
+    client.app.state.shaper = shaper
+    return shaper
+
+
+def _answering_graph(monkeypatch, answer="The pod crashloop-app is in CrashLoopBackOff."):
+    class FakeGraph:
+        async def ainvoke(self, state, config):
+            return {"messages": [AIMessage(answer)]}
+
+    monkeypatch.setattr(api, "build_graph", lambda cfg, model, tools: FakeGraph())
+    monkeypatch.setattr(api, "tool_session", _fake_session)
+
+
+def test_chat_returns_a_structured_remediation(client, monkeypatch):
+    _answering_graph(monkeypatch)
+    _stub_shaper(
+        client,
+        {
+            "action_required": True,
+            "summary": "Correct the container command on crashloop-app.",
+            "target_kind": "Pod",
+            "target_name": "crashloop-app",
+            "namespace": "fathom-eval-crashloop",
+            "commands": ["kubectl -n fathom-eval-crashloop edit pod crashloop-app"],
+            "confidence": "high",
+        },
+    )
+
+    body = client.post("/chat", json={"question": "why is it down?"}).json()
+
+    assert body["remediation"]["action_required"] is True
+    assert body["remediation"]["target_name"] == "crashloop-app"
+    assert body["remediation"]["commands"] == [
+        "kubectl -n fathom-eval-crashloop edit pod crashloop-app"
+    ]
+    assert body["remediation_error"] is None
+    # The prose answer is untouched by shaping.
+    assert body["answer"] == "The pod crashloop-app is in CrashLoopBackOff."
+
+
+def test_a_failed_shaping_call_does_not_fail_the_turn(client, monkeypatch):
+    # The whole point of remediation_error: the diagnosis is already in hand, so an
+    # infrastructure fault in the second call must not cost the caller the answer.
+    _answering_graph(monkeypatch)
+    _stub_shaper(client, RuntimeError("connection refused"))
+
+    response = client.post("/chat", json={"question": "why is it down?"})
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["answer"] == "The pod crashloop-app is in CrashLoopBackOff."
+    assert body["remediation"] is None
+    assert "connection refused" in body["remediation_error"]
+
+
+def test_an_unparseable_shaper_reply_is_reported_not_coerced(client, monkeypatch):
+    # A shaper that silently defaulted to "no action required" would report a
+    # healthy cluster every time the model returned prose.
+    _answering_graph(monkeypatch)
+    _stub_shaper(client, "I think you should probably restart it?")
+
+    body = client.post("/chat", json={"question": "why is it down?"}).json()
+
+    assert body["remediation"] is None
+    assert "unparseable" in body["remediation_error"]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Sorry, need more steps to process this request.",
+        "The model stopped while still calling tools, which usually means it hit ...",
+        "The model finished without producing an answer. The tool calls it made ...",
+    ],
+)
+def test_shaping_is_skipped_when_there_is_no_answer_to_shape(client, monkeypatch, answer):
+    # There is nothing to extract from a sentinel, and calling anyway would spend the
+    # shaping budget to learn that.
+    _answering_graph(monkeypatch, answer=answer)
+    shaper = _stub_shaper(client, {"action_required": True, "summary": "x"})
+
+    body = client.post("/chat", json={"question": "why is it down?"}).json()
+
+    assert shaper.calls == 0
+    assert body["remediation"] is None
+    assert body["remediation_error"] is None
+
+
+def test_remediation_off_skips_the_call_entirely(client, monkeypatch):
+    _answering_graph(monkeypatch)
+    shaper = _stub_shaper(client, {"action_required": True, "summary": "x"})
+    client.app.state.cfg = dataclasses.replace(client.app.state.cfg, remediation="off")
+
+    body = client.post("/chat", json={"question": "why is it down?"}).json()
+
+    assert shaper.calls == 0
+    assert body["remediation"] is None
+
+
+async def test_empty_shaper_fields_are_dropped_not_stored_blank():
+    # Ollama honours the schema but returns "" for a field it has nothing to say
+    # about. Keeping those would make "no target" indistinguishable from "blank".
+    cfg = load()
+    shaper = _Shaper(
+        json.dumps(
+            {
+                "action_required": True,
+                "summary": "Raise the memory limit.",
+                "target_kind": "",
+                "target_name": "oom-app",
+                "commands": ["", "  "],
+                "confidence": "medium",
+            }
+        )
+    )
+
+    remediation, error = await shape_remediation(cfg, shaper, "q", "an answer")
+
+    assert error == ""
+    assert remediation == {
+        "action_required": True,
+        "summary": "Raise the memory limit.",
+        "target_name": "oom-app",
+        "confidence": "medium",
+    }
 
 
 # --- message and trace helpers -------------------------------------------------

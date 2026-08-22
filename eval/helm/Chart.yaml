@@ -2,5 +2,5 @@ apiVersion: v2
 name: fathom-eval
 description: Fathom's evaluation harness -- stages broken workloads, grades the agent's answers.
 type: application
-version: 0.5.1
-appVersion: "0.5.1"
+version: 0.5.4
+appVersion: "0.5.4"

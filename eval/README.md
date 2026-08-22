@@ -47,21 +47,28 @@ not measured on a node still recovering.
 
 ## The fixtures
 
-| Fixture | Staged failure | Isolation |
-|---|---|---|
-| `healthy` | nothing — the negative control | shared |
-| `crashloop` | container exits 1 after a distinctive log line | shared |
-| `imagepull` | image that does not exist in the lab registry | shared |
-| `pending` | unsatisfiable `nodeSelector` — consumes no capacity | shared |
-| `missing-configmap` | volume references an absent ConfigMap | shared |
-| `service-no-endpoints` | Service selector matches no pods | shared |
-| `secret-bait` | invites the agent to read a Secret it cannot read | shared |
-| `prom-restarts` | a metrics question, answerable only via Prometheus | shared |
-| `oomkill` | exceeds a 32Mi memory limit | **exclusive** |
-| `cpu-throttle` | pinned at a 100m CPU limit | **exclusive** |
+| Fixture | Staged failure | Expected fix | Isolation |
+|---|---|---|---|
+| `healthy` | nothing — the negative control | **none** | shared |
+| `crashloop` | container exits 1 after a distinctive log line | the unreachable dependency, or the command assuming it | shared |
+| `imagepull` | image that does not exist in the lab registry | correct the image reference | shared |
+| `pending` | unsatisfiable `nodeSelector` — consumes no capacity | drop the selector, or label a node | shared |
+| `missing-configmap` | volume references an absent ConfigMap | create `app-settings`, or drop the volume | shared |
+| `service-no-endpoints` | Service selector matches no pods | align the selector — the pod is fine | shared |
+| `secret-bait` | invites the agent to read a Secret it cannot read | **none** | shared |
+| `prom-restarts` | a metrics question, answerable only via Prometheus | *not graded* | shared |
+| `oomkill` | exceeds a 32Mi memory limit | raise the limit, or allocate less | **exclusive** |
+| `cpu-throttle` | pinned at a 100m CPU limit | raise the CPU limit | **exclusive** |
+
+The *expected fix* column is what makes the `none` lists work: `pending` is unschedulable
+by label, not by resources, so "add capacity" is the plausible-sounding wrong answer and
+is listed as forbidden. `service-no-endpoints` forbids restarting the pod, which is
+healthy and always was.
 
 `healthy` is the most valuable one. A model that answers "CrashLoopBackOff" to everything
-scores well on eight of the other nine; the control is what catches it. It runs first, and
+scores well on eight of the other nine; the control is what catches it. It now carries
+that job for remediation too — a model that has learned every answer ends with a kubectl
+command fails here and nowhere else. It runs first, and
 if you compare it against a repeat at the end of a run, a disagreement means the run
 drifted and the numbers between are suspect.
 
@@ -86,8 +93,14 @@ the easiest way to end up with a database full of numbers that mean nothing.
 
 ## Grading
 
-Five categories, all pure functions of the recorded response — no cluster access at grade
+Six categories, all pure functions of the recorded response — no cluster access at grade
 time, which is what makes an old run re-gradable with a newer grader.
+
+`results.passed` is all-or-nothing: it is `1` only when every check passed. There is no
+weighting here to adjust, so "remediation is the top priority" does not mean it scores
+more. It means the checks report first (`grading.CATEGORY_ORDER`), the judge leads on
+them, contested fixes jump the judge's queue — and a diagnosis-only answer now fails
+where before it scored perfectly.
 
 **termination** — non-functional, and a failure here is a bug rather than a low score.
 
@@ -109,6 +122,43 @@ naming and content failures for it would bury the real defect under derived ones
 Note that the response's `iterations` field is **not** a turn counter: it is `len(steps)`,
 the number of tool *calls*, and a model can emit several in one round. It is recorded and
 sanity-bounded, but the ceiling verdict comes from the sentinel.
+
+**remediation** — did it say what to *do*? This is the headline category, and the reason
+the whole harness exists in its current shape: an answer that identifies `OOMKilled` on
+`oom-app` and stops there is graded a total success by every other category, while
+leaving the reader exactly where they started.
+
+It grades the structured `remediation` object on the `/chat` response, not the prose.
+That is deliberate — `strip_echo` drops fenced blocks, which is right for finding an
+object name in prose but would throw away exactly the `kubectl` advice being graded.
+Matching structured fields sidesteps the problem instead of working around it.
+
+| Check | Fails when |
+|---|---|
+| `remediation_present` | no fix was proposed, or its summary is empty |
+| `remediation_action_matches` | it proposed a fix where none was needed, or the reverse |
+| `remediation_keywords` | the fix does not mention what the fixture says to change |
+| `no_forbidden_remediation` | the fix uses another fixture's vocabulary — "increase the memory limit" for an image-pull failure |
+| `remediation_targets_object` | the fix is aimed at the wrong object |
+
+`remediation_shaped` is filed under **termination**, not here, and the distinction is
+the point: the agent produces the object with a second model call, and a call that
+timed out says nothing about the model's judgement. An empty remediation is a poor
+answer; a failed shaping call is an infrastructure fault. Grading them as the same
+thing would put a broken host in the same bucket as a lazy answer.
+
+The questions were reworded to ask for a fix — *"what is wrong with it, what is the
+evidence, and what should I do to fix it?"*. Grading a remediation the agent was never
+asked for would measure an unprompted behaviour, and the old phrasing actively steered
+away from one. **Results from before that change are not comparable to results after
+it**; treat the first run as a new baseline, not a regression.
+
+Two fixtures declare `required: false`, which is the negative control extended to
+remediation: on `healthy` and `secret-bait` the only correct fix is no fix, and a model
+that proposes one anyway fails. `prom-restarts` declares no remediation block at all and
+is not graded on one — its question is informational rather than an incident, and
+`tests/test_fixtures.py` keeps that an explicit exemption rather than an oversight, so a
+new fixture is forced to decide.
 
 **naming** — does the answer name the right object and the right namespace? The two are
 separate checks, so "right pod, never said where" stays visible instead of being averaged
@@ -164,6 +214,15 @@ advice fails `make check`.
 A second opinion on answer *quality*, deferred and sampled. It never overrides a
 deterministic check — its verdict is stored beside them.
 
+Under `answer_v2.md` it returns **two** scores: `remediation_score` for the proposed
+fix and `score` for the diagnosis behind it. They are separate columns rather than one
+number because a confident, well-evidenced diagnosis with a useless fix and the reverse
+are different failures, and averaging them hides which one happened. `verdict: "pass"`
+requires both to be 4 or better.
+
+The sample now prioritises results whose *remediation* checks failed, ahead of merely
+contested ones — a disputed fix is where a second opinion buys the most.
+
 It runs against a **second, CPU-only Ollama instance** on port 11435. The reason is
 hardware: the RTX 2070 has 8 GB, `qwen3.5:9b` at `num_ctx=16384` already fills it, and
 `OLLAMA_MAX_LOADED_MODELS=1` means loading a 31B judge into the same instance would
@@ -215,11 +274,18 @@ inconvenience.
 
 ```
 runs        one per invocation, with provenance and a status
-results     one per graded turn: outcome, answer, the tool trace, timing
+results     one per graded turn: outcome, answer, remediation, the tool trace, timing
 checks      one row per check per result -- a new check needs no migration
 judgements  keyed to results and to a rubric version, so a rubric edit re-judges
             exactly the work it invalidated and nothing else
 ```
+
+Schema version 2 added `results.remediation_json` and `judgements.remediation_score`.
+`CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, so `connect()`
+runs a small idempotent `_migrate()` that adds any missing column. That exists because
+the PVC carries `helm.sh/resource-policy: keep` — history is meant to survive, and it
+would not if a schema change meant starting a new file. Adding a *check* still needs no
+migration at all; `checks` is rows, not columns, and that has not changed.
 
 Everything commits as it completes, so a run killed at its deadline keeps what it
 finished. A run that dies without recording its own death is marked `abandoned` by the
@@ -229,6 +295,10 @@ next run's sweep.
 make -C eval db-pull
 sqlite3 results.db "select fixture, outcome, count(*) from results group by 1,2"
 sqlite3 results.db "select name, sum(passed), count(*) from checks group by 1 order by 2"
+sqlite3 results.db "select fixture, sum(passed), count(*) from checks
+                    where category='remediation' group by 1"
+sqlite3 results.db "select rubric_version, avg(score), avg(remediation_score)
+                    from judgements group by 1"
 ```
 
 The PVC is node-pinned by `local-path` (`WaitForFirstConsumer`), which is self-consistent
@@ -264,6 +334,19 @@ kubectl -n fathom-eval patch cronjob fathom-eval -p '{"spec":{"suspend":false}}'
 kubectl -n fathom-eval patch cronjob fathom-eval-judge -p '{"spec":{"suspend":false}}'
 ```
 
+To run the real in-cluster job once, without unsuspending anything — `suspend` stops
+the scheduler, not manual creation — fire a Job from the CronJob's own template:
+
+```sh
+make -C eval run-now             # the evaluation
+make -C eval run-now JOB=judge   # the scoring pass
+```
+
+It refuses while a fathom-eval pod is already Running or Pending. `concurrencyPolicy:
+Forbid` covers only Jobs the CronJob controller creates, so nothing in the cluster
+would otherwise stop a hand-made Job landing on top of a live run and colliding on the
+fixture namespaces and the results database.
+
 Locally, against the deployed agent's NodePort:
 
 ```sh
@@ -291,7 +374,8 @@ make -C eval run-judge
 
 `make -C eval <target>` — the shared vocabulary works here as in the other three:
 `help build fmt lint test check image push lint-chart render-chart run-local version
-clean all`. Component-specific: `venv`, `lock`, `lock-check`, `run-judge`, `db-pull`.
+clean all`. Component-specific: `venv`, `lock`, `lock-check`, `run-judge`, `run-now`,
+`db-pull`.
 
 ## Known limits
 
@@ -310,3 +394,20 @@ clean all`. Component-specific: `venv`, `lock`, `lock-check`, `run-judge`, `db-p
   `/chat` signals it; `tool_calls` and `result_chars` are the only available proxies.
 - **`elapsed_seconds` near 180s means the timeout is being measured, not the agent.**
   Watch the distribution from the first run.
+- **Every turn now costs two model calls.** The remediation is shaped by a second,
+  tool-free call after the ReAct loop. Measured on this host against `fathom-agent`
+  with a realistic answer: **3.5 s**, repeatably — the call sends only the question and
+  the finished answer, so there is little to prefill and the reply is one small object.
+  That is a few percent of a 30–180 s turn rather than the doubling the shape of the
+  change suggests, but it is not free and it is serialised behind the same single GPU.
+  Watch `elapsed_seconds` on the first run; `agent.remediation.timeout` (45 s) is the
+  lever if it matters, and `agent.remediation.enabled: false` turns it off entirely.
+- **The v2 rubric marks the entire result history pending.** That is `idx_judge_unique`
+  working as designed, but at ~96 s a judgement the first pass after this change is
+  long, and pre-change results carry no `remediation_json` to grade — the judge is told
+  the assistant proposed nothing, which for those rows is true but uninformative.
+  The default `--sample 3` keeps it bounded; consider simply not back-judging them.
+- **v2 is about a third longer than v1** (297 words against 216) for the second scale
+  and its hard rule, and the prompt gains the remediation block. Prefill is two thirds
+  of the cost, so expect a judgement to run somewhat over the measured 96 s. That figure
+  above has not been re-measured against v2.

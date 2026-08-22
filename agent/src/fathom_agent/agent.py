@@ -7,6 +7,8 @@ to a single model turn.
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -14,6 +16,42 @@ from langchain_core.tools import BaseTool
 from langgraph.prebuilt import create_react_agent
 
 from .config import Config
+
+log = logging.getLogger("fathom_agent.agent")
+
+# The shape of a proposed fix. Deliberately flat: this model fills a handful of
+# top-level fields reliably and nested objects much less so, and every field here is
+# something the eval harness grades or a human reads.
+#
+# `action_required` is the escape hatch and it is the reason this is a boolean rather
+# than an implied "there is always a fix". A healthy cluster has no remediation, and a
+# schema that cannot say so teaches the model to invent one.
+REMEDIATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "action_required": {"type": "boolean"},
+        "summary": {"type": "string"},
+        "target_kind": {"type": "string"},
+        "target_name": {"type": "string"},
+        "namespace": {"type": "string"},
+        "commands": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+    },
+    "required": ["action_required", "summary", "confidence"],
+}
+
+SHAPER_PROMPT = """\
+You are extracting the recommended fix from a Kubernetes troubleshooting answer that
+has already been written. You are not diagnosing anything yourself and you have no
+tools: use only what the answer says.
+
+Fill the schema from the answer. `summary` is one sentence saying what to change.
+`commands` are the kubectl commands the answer gives or clearly implies, if any.
+`target_name` is the object the fix applies to.
+
+If the answer says nothing is wrong, or recommends no action, set action_required to
+false and say so in `summary`. Do not invent a fix the answer does not support.\
+"""
 
 
 def build_graph(cfg: Config, model, tools: list[BaseTool]):
@@ -103,3 +141,82 @@ def _text(content: Any) -> str:
         ]
         return "".join(parts)
     return str(content)
+
+
+async def shape_remediation(
+    cfg: Config, shaper, question: str, answer: str
+) -> tuple[dict | None, str]:
+    """Turn a finished answer into a structured remediation. Never raises.
+
+    Returns (remediation, error). Both being falsy means the call was deliberately
+    skipped. The distinction the caller needs -- and the harness grades -- is between
+    "the model proposed no fix", which is an answer worth recording as poor, and "the
+    shaping call failed", which is an infrastructure fault and says nothing about the
+    model's judgement. That is what `error` carries.
+
+    Only the question and the finished answer go in, never the transcript: the context
+    window is 16k, prefill dominates the cost of a call this short, and the tool
+    results have already done their work by this point.
+    """
+    if cfg.remediation != "on":
+        return None, ""
+
+    # Nothing to shape. These are the sentinels the caller would otherwise pay a full
+    # shaping timeout to learn nothing about.
+    if not answer.strip() or answer.startswith(_NO_ANSWER_PREFIXES):
+        return None, ""
+
+    messages = [
+        SystemMessage(SHAPER_PROMPT),
+        HumanMessage(f"QUESTION\n{question}\n\nANSWER\n{answer}"),
+    ]
+    try:
+        reply = await shaper.ainvoke(messages)
+    except Exception as err:  # noqa: BLE001 - reported, never fatal to the turn
+        log.warning("remediation shaping failed: %s", err)
+        return None, f"{type(err).__name__}: {err}"
+
+    text = _text(reply.content).strip()
+    if not text:
+        return None, "shaper returned an empty response"
+
+    try:
+        parsed = json.loads(text)
+    except ValueError as err:
+        # Recorded rather than coerced. A shaper that silently defaults to
+        # "no action required" would report a healthy cluster on every parse failure.
+        return None, f"unparseable shaper response: {err}"
+
+    if not isinstance(parsed, dict) or "action_required" not in parsed:
+        return None, "shaper response did not match the schema"
+
+    return _clean_remediation(parsed), ""
+
+
+def _clean_remediation(parsed: dict) -> dict:
+    """Normalise the shaper's object to the schema's types, dropping empty fields.
+
+    Ollama honours the schema, but a field it has nothing to say about comes back as
+    an empty string rather than absent. Dropping those keeps "the model gave no
+    target" distinguishable from "the model gave an empty target".
+    """
+    out: dict[str, Any] = {
+        "action_required": bool(parsed.get("action_required")),
+        "summary": str(parsed.get("summary") or "").strip(),
+    }
+    for key in ("target_kind", "target_name", "namespace", "confidence"):
+        if value := str(parsed.get(key) or "").strip():
+            out[key] = value
+    commands = [str(c).strip() for c in (parsed.get("commands") or []) if str(c).strip()]
+    if commands:
+        out["commands"] = commands
+    return out
+
+
+# The openings of the two fallbacks _answer() produces, plus LangGraph's own
+# short-circuit string. Matched by prefix because only the opening clause is stable.
+_NO_ANSWER_PREFIXES = (
+    "The model stopped while still calling tools",
+    "The model finished without producing an answer",
+    "Sorry, need more steps to process this request.",
+)

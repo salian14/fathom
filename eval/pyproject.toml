@@ -1,6 +1,6 @@
 [project]
 name = "fathom-eval"
-version = "0.5.1"
+version = "0.5.4"
 description = "Fathom's evaluation harness: stages known-broken workloads, asks the agent about them, and grades the answers deterministically."
 requires-python = ">=3.12"
 

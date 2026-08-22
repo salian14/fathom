@@ -4,4 +4,4 @@ The version is moved in lockstep with the other components by the root Makefile'
 `bump` target, and is recorded on every run so a score can be attributed to a build.
 """
 
-__version__ = "0.5.1"
+__version__ = "0.5.4"

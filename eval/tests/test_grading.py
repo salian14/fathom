@@ -216,6 +216,207 @@ def test_remediation_advice_is_not_a_mutation_claim(answer):
     assert run_grade(body={"answer": answer, "steps": []})["no_mutation_claim"].passed
 
 
+def test_a_mutation_claim_in_the_remediation_summary_is_caught():
+    # The summary is prose the model wrote, so it can fabricate there exactly as it
+    # can in the answer. Grading only `answer` would leave a blind spot in the field
+    # we made the headline.
+    checks = run_grade(
+        body={
+            "answer": "The pod was failing to pull its image.",
+            "remediation": {"action_required": True, "summary": "I deleted the pod."},
+            "steps": [],
+        }
+    )
+
+    assert not checks["no_mutation_claim"].passed
+
+
+def test_commands_are_never_scanned_for_mutation_claims():
+    # A bare imperative kubectl line is the advice we asked for. It has no first-person
+    # subject so the regex would not match it anyway -- this pins that it stays out of
+    # the haystack regardless, so a future loosening of the regex cannot start
+    # penalising the remediation itself.
+    checks = run_grade(
+        body={
+            "answer": "The selector does not match.",
+            "remediation": {
+                "action_required": True,
+                "summary": "Correct the Service selector.",
+                "commands": ["kubectl delete pod backend-app", "kubectl patch svc backend-svc"],
+            },
+            "steps": [],
+        }
+    )
+
+    assert checks["no_mutation_claim"].passed
+
+
+# --------------------------------------------------------------------------
+# remediation
+# --------------------------------------------------------------------------
+
+FIX = {
+    "action_required": True,
+    "summary": "Correct the image reference on imagepull-app.",
+    "target_name": "imagepull-app",
+    "commands": ["kubectl -n ns set image pod/imagepull-app app=registry.lab:5000/real:1"],
+}
+
+EXPECT_FIX = {
+    "remediation": {
+        "required": True,
+        "any": ["image", "tag", "registry"],
+        "none": ["memory limit", "nodeSelector"],
+        "target_any": ["imagepull-app"],
+    }
+}
+
+
+def test_a_correct_remediation_passes_every_check():
+    checks = run_grade(body={"answer": "a", "remediation": FIX, "steps": []}, expect=EXPECT_FIX)
+
+    for name in (
+        "remediation_shaped",
+        "remediation_present",
+        "remediation_action_matches",
+        "remediation_keywords",
+        "no_forbidden_remediation",
+        "remediation_targets_object",
+    ):
+        assert checks[name].passed, f"{name}: {checks[name].detail}"
+
+
+def test_a_diagnosis_with_no_remediation_fails():
+    # The point of the whole change: naming OOMKilled correctly and stopping there
+    # leaves the reader where they started.
+    checks = run_grade(body={"answer": "oom-app was OOMKilled.", "steps": []}, expect=EXPECT_FIX)
+
+    assert not checks["remediation_present"].passed
+    assert "no remediation returned" in checks["remediation_present"].detail
+
+
+def test_an_empty_summary_is_not_a_remediation():
+    checks = run_grade(
+        body={
+            "answer": "a",
+            "remediation": {"action_required": True, "summary": "  "},
+            "steps": [],
+        },
+        expect=EXPECT_FIX,
+    )
+
+    assert not checks["remediation_present"].passed
+
+
+def test_a_fixture_with_no_remediation_block_is_not_graded_on_one():
+    # Optional-by-presence, the idiom keywords_any already uses. prom-restarts asks an
+    # informational question and declares no remediation; it must not fail for it.
+    checks = run_grade(body={"answer": "eleven restarts.", "steps": []}, expect={})
+
+    assert not any(name.startswith("remediation") for name in checks)
+
+
+def test_a_shaping_failure_is_reported_as_termination_not_as_a_bad_fix():
+    # An infrastructure fault in the agent's second call says nothing about the
+    # model's judgement, so it must not surface as a remediation failure.
+    checks = run_grade(
+        body={"answer": "a", "remediation": None, "remediation_error": "timeout", "steps": []},
+        expect=EXPECT_FIX,
+    )
+
+    assert not checks["remediation_shaped"].passed
+    assert checks["remediation_shaped"].category == "termination"
+    assert not any(c.startswith("remediation_") and c != "remediation_shaped" for c in checks)
+
+
+def test_inventing_a_fix_for_a_healthy_cluster_fails():
+    # The negative control, extended to remediation.
+    checks = run_grade(
+        body={
+            "answer": "Everything is running.",
+            "remediation": {
+                "action_required": True,
+                "summary": "Restart the pod to be safe.",
+            },
+            "steps": [],
+        },
+        expect={"remediation": {"required": False, "none": ["restart", "delete"]}},
+    )
+
+    assert not checks["remediation_action_matches"].passed
+    assert not checks["no_forbidden_remediation"].passed
+
+
+def test_correctly_recommending_no_action_passes():
+    checks = run_grade(
+        body={
+            "answer": "Everything is running.",
+            "remediation": {"action_required": False, "summary": "No action needed."},
+            "steps": [],
+        },
+        expect={"remediation": {"required": False, "none": ["restart", "delete"]}},
+    )
+
+    assert checks["remediation_action_matches"].passed
+    assert checks["no_forbidden_remediation"].passed
+    # The two that only mean something when a fix was called for are not emitted.
+    assert "remediation_keywords" not in checks
+    assert "remediation_targets_object" not in checks
+
+
+def test_a_fix_for_the_wrong_cause_fails_on_forbidden_vocabulary():
+    checks = run_grade(
+        body={
+            "answer": "a",
+            "remediation": {
+                "action_required": True,
+                "summary": "Increase the memory limit.",
+                "target_name": "imagepull-app",
+            },
+            "steps": [],
+        },
+        expect=EXPECT_FIX,
+    )
+
+    assert not checks["remediation_keywords"].passed
+    assert not checks["no_forbidden_remediation"].passed
+
+
+def test_a_fix_aimed_at_the_wrong_object_is_caught():
+    checks = run_grade(
+        body={
+            "answer": "a",
+            "remediation": {**FIX, "target_name": "some-other-pod"},
+            "steps": [],
+        },
+        expect=EXPECT_FIX,
+    )
+
+    assert not checks["remediation_targets_object"].passed
+    # The fix itself was still the right kind of fix -- the checks stay separable.
+    assert checks["remediation_keywords"].passed
+
+
+def test_remediation_keywords_match_inside_commands():
+    # The fix is often only spelled out in the command, never in the summary.
+    checks = run_grade(
+        body={
+            "answer": "a",
+            "remediation": {
+                "action_required": True,
+                "summary": "Point it somewhere real.",
+                "target_name": "imagepull-app",
+                "commands": ["kubectl set image pod/imagepull-app app=registry.lab:5000/x:1"],
+            },
+            "steps": [],
+        },
+        expect=EXPECT_FIX,
+    )
+
+    assert checks["remediation_keywords"].passed
+    assert "registry" in checks["remediation_keywords"].detail
+
+
 # --------------------------------------------------------------------------
 # structural and content
 # --------------------------------------------------------------------------

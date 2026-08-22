@@ -34,7 +34,7 @@ from .fixtures import load_all
 
 log = logging.getLogger("fathom_eval.judge")
 
-RUBRIC_FILE = "answer_v1.md"
+RUBRIC_FILE = "answer_v2.md"
 
 
 def rubric() -> tuple[str, str]:
@@ -51,7 +51,12 @@ def rubric() -> tuple[str, str]:
 
 
 def build_prompt(
-    rubric_text: str, ground_truth: str, question: str, answer: str, steps: list
+    rubric_text: str,
+    ground_truth: str,
+    question: str,
+    answer: str,
+    steps: list,
+    remediation: dict | None = None,
 ) -> str:
     """Assemble a judging prompt deterministically.
 
@@ -75,8 +80,28 @@ def build_prompt(
         f"--- QUESTION ASKED ---\n{question}\n\n"
         f"--- TOOL CALLS THE ASSISTANT MADE ---\n{rendered}\n\n"
         f"--- THE ASSISTANT'S ANSWER ---\n{answer}\n\n"
+        f"--- THE ASSISTANT'S PROPOSED REMEDIATION ---\n{_render_remediation(remediation)}\n\n"
         f"--- YOUR VERDICT (JSON only) ---\n"
     )
+
+
+def _render_remediation(remediation: dict | None) -> str:
+    """The proposed fix, in a fixed field order so re-judging is not a new experiment.
+
+    An absent remediation is rendered as a sentence rather than omitted: "the
+    assistant proposed no fix" is itself the thing being graded, and a missing section
+    would read to the judge as a prompt-assembly bug.
+    """
+    if not remediation:
+        return "  (the assistant proposed no remediation)"
+
+    lines = [f"  action_required: {bool(remediation.get('action_required'))}"]
+    for key in ("summary", "target_kind", "target_name", "namespace", "confidence"):
+        if value := remediation.get(key):
+            lines.append(f"  {key}: {value}")
+    for command in remediation.get("commands") or []:
+        lines.append(f"  command: {command}")
+    return "\n".join(lines)
 
 
 def parse_verdict(raw: str) -> dict:
@@ -96,7 +121,15 @@ def parse_verdict(raw: str) -> dict:
     score = int(parsed.get("score", 0))
     if not 1 <= score <= 5:
         raise ValueError(f"score must be 1-5, got {score}")
-    return {"verdict": verdict, "score": score, "rationale": str(parsed.get("rationale", ""))}
+    remediation_score = int(parsed.get("remediation_score", 0))
+    if not 1 <= remediation_score <= 5:
+        raise ValueError(f"remediation_score must be 1-5, got {remediation_score}")
+    return {
+        "verdict": verdict,
+        "score": score,
+        "remediation_score": remediation_score,
+        "rationale": str(parsed.get("rationale", "")),
+    }
 
 
 def judge(cfg: Config, limit: int | None = None, sample: int | None = None) -> int:
@@ -137,6 +170,7 @@ def _judge_one(conn, client, cfg, row, rubric_text, rubric_version, ground_truth
         row["question_text"] or row["question_id"],
         row["answer"] or "",
         json.loads(row["steps_json"] or "[]"),
+        json.loads(row["remediation_json"] or "null"),
     )
     try:
         response = client.post(
@@ -187,9 +221,10 @@ def _judge_one(conn, client, cfg, row, rubric_text, rubric_version, ground_truth
         **verdict,
     )
     log.info(
-        "  result %s (%s): %s score=%d",
+        "  result %s (%s): %s remediation=%d answer=%d",
         row["id"],
         row["fixture"],
         verdict["verdict"],
+        verdict["remediation_score"],
         verdict["score"],
     )

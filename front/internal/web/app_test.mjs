@@ -212,4 +212,71 @@ check('corrupt storage is survivable', () => {
   assert.equal(ctx.activeChat(), null, 'load() must not throw or invent a chat');
 });
 
+// --- remediation ----------------------------------------------------------
+
+// Flatten a rendered node to the text it would show, so a check can assert on
+// content without knowing the element tree.
+const textOf = (node) =>
+  node.children.length
+    ? node.children.map(textOf).join(' ')
+    : String(node.textContent || '');
+
+check('renders the proposed fix, its target and its commands', () => {
+  const node = ctx.remediationNode({
+    action_required: true,
+    summary: 'Raise the memory limit on oom-app.',
+    target_kind: 'Pod',
+    target_name: 'oom-app',
+    namespace: 'fathom-eval-oomkill',
+    commands: ['kubectl -n fathom-eval-oomkill set resources pod/oom-app --limits=memory=256Mi'],
+  });
+  const text = textOf(node);
+  assert.ok(text.includes('Suggested fix'), text);
+  assert.ok(text.includes('Raise the memory limit on oom-app.'), text);
+  assert.ok(text.includes('Pod oom-app in fathom-eval-oomkill'), text);
+  assert.ok(text.includes('--limits=memory=256Mi'), text);
+});
+
+check('a healthy cluster does not get an incident treatment', () => {
+  const node = ctx.remediationNode({
+    action_required: false,
+    summary: 'Nothing is wrong; no action needed.',
+    commands: ['kubectl delete pod healthy-app'],
+  });
+  assert.ok(node.className.includes('none'), node.className);
+  const text = textOf(node);
+  assert.ok(text.includes('No action needed'), text);
+  // Commands are suppressed when there is nothing to act on -- rendering one
+  // beside "no action needed" invites the reader to run it.
+  assert.ok(!text.includes('kubectl delete'), text);
+});
+
+check('the fix is rendered as text, never as markup', () => {
+  // Same rule as the rest of the render path: this is model output.
+  const node = ctx.remediationNode({
+    action_required: true,
+    summary: '<img src=x onerror="alert(1)">',
+    commands: ['<script>alert(2)</script>'],
+  });
+  const walk = (n) => {
+    assert.equal(n.innerHTML, undefined, 'innerHTML must never be assigned');
+    n.children.forEach(walk);
+  };
+  walk(node);
+  assert.ok(textOf(node).includes('<img src=x'), 'the tag must survive as literal text');
+});
+
+check('the remediation never goes back on the wire', () => {
+  // /chat is stateless and the client owns the transcript, so replaying a fix we
+  // were given would feed the model its own output as if the user had said it.
+  const { history } = ctx.buildHistory([
+    { role: 'user', content: 'why?' },
+    { role: 'assistant', content: 'because.', remediation: { action_required: true } },
+  ]);
+  same(history, [
+    { role: 'user', content: 'why?' },
+    { role: 'assistant', content: 'because.' },
+  ]);
+});
+
 console.log('\n' + pass + ' checks passed');

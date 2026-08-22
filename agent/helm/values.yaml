@@ -57,8 +57,21 @@ agent:
   requestTimeout: 180s
   mcpTimeout: 30s
   readyCache: 30s
-  # Empty means the prompt compiled into the image.
+  # Empty means the prompt compiled into the image. Note that overriding it replaces
+  # the prompt wholesale, including the instruction to lead with a remediation -- an
+  # override written before that existed will score badly on fathom-eval's
+  # remediation checks for a reason that is configuration, not the model.
   systemPrompt: ""
+
+  remediation:
+    # The second, tool-free model call that shapes the finished answer into the
+    # structured `remediation` object on the /chat response. Off is supported and
+    # simply omits the field; the prose answer is unchanged either way.
+    enabled: true
+    # Budget for that call alone, inside requestTimeout above. Deliberately well
+    # below it: the diagnosis is already in hand by the time shaping starts, so a
+    # slow shaper should cost the fix, never the answer.
+    timeout: 45s
 
 otel:
   # otlp | console | off.
