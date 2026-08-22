@@ -117,7 +117,8 @@ lock:
 	@docker run --rm -v "$(CURDIR):/w" -w /w python:3.12-slim sh -c '\
 	  pip install --quiet --upgrade pip && \
 	  pip install --quiet pip-tools && \
-	  pip-compile --quiet --strip-extras --output-file requirements.lock pyproject.toml'
+	  pip-compile --quiet --strip-extras --output-file requirements.lock pyproject.toml && \
+	  chown $(shell id -u):$(shell id -g) requirements.lock'
 	@echo "==> requirements.lock regenerated"
 
 .PHONY: image
