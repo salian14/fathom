@@ -223,14 +223,38 @@ class Cluster:
             return False
 
 
+def _tokenise(path: str) -> list[str]:
+    """Split a path on dots that are NOT inside brackets.
+
+    The naive `path.split(".")` is wrong and was: a filter such as
+    `conditions[?(@.type=='PodScheduled')]` contains a dot of its own, so splitting
+    blindly tears the expression into fragments and the lookup silently returns None --
+    which readiness code reads as "not ready yet" and waits out the whole timeout.
+    """
+    tokens, current, depth = [], [], 0
+    for char in path.lstrip("."):
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+        if char == "." and depth == 0:
+            tokens.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    if current:
+        tokens.append("".join(current))
+    return [t for t in tokens if t]
+
+
 def _jsonpath(obj, path: str):
     """A deliberately small subset of JSONPath: dotted keys, [n], and [?(@.k=='v')].
 
-    Enough for pod status, and small enough to read. A general implementation would be
-    another dependency and another thing that can surprise you at 01:00.
+    Enough for pod status, and small enough to read in full. A general implementation
+    would be another dependency and another thing that can surprise you at 01:00.
     """
     current = obj
-    for part in path.lstrip(".").split("."):
+    for part in _tokenise(path):
         if current is None:
             return None
         # A filter such as conditions[?(@.type=='PodScheduled')]
@@ -238,18 +262,22 @@ def _jsonpath(obj, path: str):
             name, _, expr = part.partition("[?(@.")
             key, _, wanted = expr.rstrip(")]").partition("==")
             wanted = wanted.strip("'\"")
-            items = (current or {}).get(name) or [] if name else current
-            current = next((i for i in items if str(i.get(key)) == wanted), None)
+            items = current.get(name) if name else current
+            if not isinstance(items, list):
+                return None
+            current = next(
+                (i for i in items if isinstance(i, dict) and str(i.get(key)) == wanted), None
+            )
             continue
         if "[" in part and part.endswith("]"):
             name, _, index = part.partition("[")
-            items = (current or {}).get(name) if name else current
-            if not items:
+            items = current.get(name) if name else current
+            if not isinstance(items, list):
                 return None
             idx = int(index.rstrip("]"))
             current = items[idx] if idx < len(items) else None
             continue
-        current = (current or {}).get(part) if isinstance(current, dict) else None
+        current = current.get(part) if isinstance(current, dict) else None
     return current
 
 
