@@ -225,7 +225,17 @@ it actually call" is the first question worth asking when an answer looks wrong:
 
 ```json
 {
-  "answer": "Yes, the fathom-mcp deployment is healthy...",
+  "answer": "The oom-app pod is being OOMKilled against its 32Mi limit...",
+  "remediation": {
+    "action_required": true,
+    "summary": "Raise oom-app's memory limit above what the container allocates.",
+    "target_kind": "Pod",
+    "target_name": "oom-app",
+    "namespace": "fathom-eval-oomkill",
+    "commands": ["kubectl -n fathom-eval-oomkill edit pod oom-app"],
+    "confidence": "high"
+  },
+  "remediation_error": null,
   "steps": [
     {"tool": "k8s_describe",
      "args": {"resource": "deployments.apps", "name": "fathom-mcp", "namespace": "fathom"},
@@ -244,6 +254,41 @@ or the MCP server failed, `504` the turn exceeded `agent.requestTimeout`.
 Expect tens of seconds per question on lab hardware — a five-tool answer takes
 roughly 40 s against a 9B model on CPU. `agent.requestTimeout` defaults to 180 s
 for that reason.
+
+### The remediation
+
+`remediation` is the proposed fix, and the reason the prompt tells the model to lead
+with one: an answer that diagnoses correctly and stops there leaves the reader exactly
+where they started. `fathom-eval` grades it as its own category.
+
+It is produced by a **second, tool-free model call** after the ReAct loop, using
+Ollama's structured-output `format` to fill a fixed schema. It is a separate call
+rather than a step in the loop because `format` and tool calling contend for the same
+channel — constraining the loop's output would break the tool calls it exists to make.
+Only the question and the finished answer go into it, never the transcript: the window
+is 16k and the tool results have already done their work by then.
+
+`action_required: false` is the case where the correct fix is no fix. Without it a
+model learns that every answer ends in a kubectl command, which is what
+`fathom-eval`'s `healthy` control exists to catch.
+
+**`remediation` and `remediation_error` are never both set, and both can be null.**
+The distinction matters and is why the second field exists:
+
+| `remediation` | `remediation_error` | Meaning |
+|---|---|---|
+| object | `null` | a fix was proposed |
+| `null` | `null` | shaping was skipped — turned off, or the answer was a sentinel worth nothing to shape |
+| `null` | string | the shaping call itself failed |
+
+A shaping failure never fails the turn. The diagnosis is already in hand by then and
+is worth returning without a fix attached, so `/chat` still answers 200 — which is
+also why the harness grades an empty `remediation` and a `remediation_error` as
+different things: one is a poor answer, the other is an infrastructure fault.
+
+Set `agent.remediation.enabled: false` to skip the second call entirely; the prose
+answer is unchanged either way. `agent.remediation.timeout` (45 s) bounds it inside
+`agent.requestTimeout`.
 
 ## Configuration
 
@@ -267,7 +312,9 @@ environment variables, the same pattern the MCP server uses.
 | `agent.mcpTimeout` | `30s` | Single MCP call |
 | `agent.readyCache` | `30s` | How long a `/readyz` result is reused |
 | `agent.logLevel` | `info` | `debug`, `info`, `warn`, `error` |
-| `agent.systemPrompt` | `""` | Empty uses the prompt built into the image |
+| `agent.systemPrompt` | `""` | Empty uses the prompt built into the image. An override replaces it wholesale, including the instruction to lead with a fix |
+| `agent.remediation.enabled` | `true` | The second, tool-free call that produces `remediation` |
+| `agent.remediation.timeout` | `45s` | Budget for that call, inside `requestTimeout` |
 | `otel.mode` | `otlp` | `otlp`, `console` or `off` — picks the exporter, not its tuning |
 | `otel.endpoint` | `http://otel-collector.observability.svc.cluster.local:4317` | Collector address. FQDN because it is another namespace; `http://` selects plaintext gRPC |
 | `otel.sampler` | `parentbased_always_on` | Probes are excluded before sampling, so this only samples real work |

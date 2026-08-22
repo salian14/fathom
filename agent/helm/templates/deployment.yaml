@@ -65,6 +65,10 @@ spec:
               value: {{ .Values.agent.mcpTimeout | quote }}
             - name: FATHOM_AGENT_READY_CACHE
               value: {{ .Values.agent.readyCache | quote }}
+            - name: FATHOM_AGENT_REMEDIATION
+              value: {{ ternary "on" "off" .Values.agent.remediation.enabled | quote }}
+            - name: FATHOM_AGENT_REMEDIATION_TIMEOUT
+              value: {{ .Values.agent.remediation.timeout | quote }}
             {{- with .Values.agent.systemPrompt }}
             - name: FATHOM_AGENT_SYSTEM_PROMPT
               value: {{ . | quote }}

@@ -47,10 +47,16 @@ ready:
 questions:
   - id: q1
     text: >-
-      The pod in the {{ namespace }} namespace never started. Why not?
+      The pod in the {{ namespace }} namespace never started. Why not, and what should
+      I do to fix it?
     expect:
       names: [imagepull-app]
       namespace: true
       tools_any: [k8s_describe, k8s_get]
       keywords_any: ["ImagePullBackOff", "ErrImagePull", "image pull", "pull the image", "does not exist"]
       must_not_claim_mutation: true
+      remediation:
+        required: true
+        any: ["image", "tag", "registry", "push", "reference"]
+        none: ["memory limit", "nodeSelector", "configmap", "selector"]
+        target_any: [imagepull-app]

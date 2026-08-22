@@ -128,3 +128,102 @@ def test_sampling_caps_per_fixture_and_question(conn):
         store.record_result(conn, run_id, a_result(iteration=i), [Check("a", "x", True)])
     assert len(store.pending_judgements(conn, "v1", sample=3)) == 3
     assert len(store.pending_judgements(conn, "v1", sample=0)) == 10
+
+
+# --------------------------------------------------------------------------
+# remediation columns and the v1 -> v2 migration
+# --------------------------------------------------------------------------
+
+
+def test_the_remediation_round_trips(conn):
+    run = store.start_run(conn)
+    fix = {"action_required": True, "summary": "Raise the memory limit.", "commands": ["kubectl x"]}
+
+    rid = store.record_result(conn, run, a_result(remediation=fix), [])
+
+    stored = conn.execute("SELECT remediation_json FROM results WHERE id=?", (rid,)).fetchone()
+    assert json.loads(stored["remediation_json"]) == fix
+
+
+def test_no_remediation_is_null_not_an_empty_object(conn):
+    # NULL and "{}" would both read as falsy in Python but mean different things in a
+    # query: "the agent proposed nothing" versus "it proposed an empty fix".
+    run = store.start_run(conn)
+    rid = store.record_result(conn, run, a_result(), [])
+
+    stored = conn.execute("SELECT remediation_json FROM results WHERE id=?", (rid,)).fetchone()
+    assert stored["remediation_json"] is None
+
+
+def test_the_judge_records_both_scores(conn):
+    run = store.start_run(conn)
+    rid = store.record_result(conn, run, a_result(), [])
+
+    store.record_judgement(
+        conn,
+        rid,
+        judge_model="fathom-judge",
+        rubric_version="answer_v2-abc",
+        verdict="fail",
+        score=5,
+        remediation_score=2,
+        rationale="right cause, useless fix",
+    )
+
+    row = conn.execute("SELECT score, remediation_score FROM judgements").fetchone()
+    assert (row["score"], row["remediation_score"]) == (5, 2)
+
+
+def test_a_disputed_remediation_is_judged_before_a_merely_contested_result(conn):
+    # The headline category jumps the queue: a fix the deterministic checks rejected
+    # is where a second opinion buys the most.
+    run = store.start_run(conn)
+    contested = store.record_result(
+        conn,
+        run,
+        a_result(question_id="q1"),
+        [Check("naming", "names_resource", True), Check("content", "root_cause_keywords", False)],
+    )
+    bad_fix = store.record_result(
+        conn,
+        run,
+        a_result(question_id="q2"),
+        [
+            Check("naming", "names_resource", True),
+            Check("remediation", "remediation_keywords", False),
+        ],
+    )
+
+    queue = store.pending_judgements(conn, "answer_v2-abc", sample=0)
+
+    assert [r["id"] for r in queue][0] == bad_fix
+    assert contested in [r["id"] for r in queue]
+
+
+def test_migrating_a_v1_database_keeps_its_history(tmp_path):
+    # The results PVC is annotated keep, so a schema change must never mean starting
+    # a new file. Simulates a v1 database by dropping the added columns back off.
+    path = str(tmp_path / "old.db")
+    with store.opened(path) as c:
+        run = store.start_run(c, git_sha="old")
+        store.record_result(c, run, a_result(answer="an old answer"), [])
+        for table, column, _ in store._ADDED_COLUMNS:
+            c.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        c.commit()
+
+    with store.opened(path) as c:
+        columns = {r["name"] for r in c.execute("PRAGMA table_info(results)")}
+        assert "remediation_json" in columns
+        row = c.execute("SELECT answer, remediation_json FROM results").fetchone()
+        assert row["answer"] == "an old answer"
+        assert row["remediation_json"] is None
+
+
+def test_migration_is_idempotent(tmp_path):
+    path = str(tmp_path / "results.db")
+    for _ in range(3):
+        with store.opened(path) as c:
+            pass
+    with store.opened(path) as c:
+        columns = [r["name"] for r in c.execute("PRAGMA table_info(judgements)")]
+        assert columns.count("remediation_score") == 1

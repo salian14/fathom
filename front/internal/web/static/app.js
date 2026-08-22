@@ -182,6 +182,10 @@ function messageNode(msg, index) {
   who.textContent = msg.role === 'user' ? 'You' : msg.error ? 'Error' : 'Fathom';
   wrap.append(who);
 
+  // The fix leads, because it is the thing the reader acts on. The prose below it
+  // is the evidence for it.
+  if (msg.remediation) wrap.append(remediationNode(msg.remediation));
+
   const body = document.createElement('div');
   body.className = 'body';
   formatInto(body, msg.content);
@@ -197,6 +201,48 @@ function messageNode(msg, index) {
 
   if (msg.meta) wrap.append(metaNode(msg.meta));
   if (msg.error) wrap.append(retryNode(index));
+
+  return wrap;
+}
+
+// remediationNode renders the structured fix the agent proposed. Same rule as the
+// rest of this file: textContent only, never innerHTML -- this is model output.
+function remediationNode(fix) {
+  const wrap = document.createElement('div');
+  wrap.className = 'remediation' + (fix.action_required ? '' : ' none');
+
+  const label = document.createElement('div');
+  label.className = 'who';
+  label.textContent = fix.action_required ? 'Suggested fix' : 'No action needed';
+  wrap.append(label);
+
+  if (fix.summary) {
+    const p = document.createElement('p');
+    p.textContent = fix.summary;
+    wrap.append(p);
+  }
+
+  // Only meaningful when there is something to act on; on a healthy cluster the
+  // label above has already said everything.
+  if (fix.action_required) {
+    const target = [fix.target_kind, fix.target_name].filter(Boolean).join(' ');
+    if (target || fix.namespace) {
+      const p = document.createElement('p');
+      p.className = 'target';
+      p.textContent = [target, fix.namespace && 'in ' + fix.namespace]
+        .filter(Boolean)
+        .join(' ');
+      wrap.append(p);
+    }
+
+    for (const command of fix.commands || []) {
+      const pre = document.createElement('pre');
+      const code = document.createElement('code');
+      code.textContent = command;
+      pre.append(code);
+      wrap.append(pre);
+    }
+  }
 
   return wrap;
 }
@@ -403,6 +449,7 @@ async function run(chat, question, history) {
       chat.messages.push({
         role: 'assistant',
         content: payload && payload.answer ? payload.answer : '(the agent returned no answer)',
+        remediation: payload && payload.remediation,
         meta: {
           steps: payload && payload.steps,
           iterations: payload && payload.iterations,

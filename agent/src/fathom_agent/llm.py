@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from langchain_ollama import ChatOllama
 
+from .agent import REMEDIATION_SCHEMA
 from .config import Config
 
 
@@ -35,4 +36,28 @@ def build_model(cfg: Config) -> ChatOllama:
         # what reports that, rather than a crash loop the operator has to decode.
         validate_model_on_init=False,
         client_kwargs={"timeout": cfg.request_timeout},
+    )
+
+
+def build_shaper(cfg: Config) -> ChatOllama:
+    """The second model, used only to shape a finished answer into a remediation.
+
+    Same base model and the same deliberate silence on serving parameters as
+    build_model. Two differences, both load-bearing:
+
+    - `format` pins Ollama's structured-output schema, so the reply is the object we
+      asked for rather than prose we would have to parse. That is also why this is a
+      separate call and not a step in the ReAct loop: `format` and tool calling
+      contend for the same channel, and constraining the loop's output would break
+      the tool calls it exists to make.
+    - Its own timeout, below the turn's. The diagnosis is already in hand by the time
+      this runs, so the shaping call must never be what costs the caller the answer.
+    """
+    return ChatOllama(
+        base_url=cfg.ollama_url,
+        model=cfg.model,
+        reasoning=False,
+        validate_model_on_init=False,
+        format=REMEDIATION_SCHEMA,
+        client_kwargs={"timeout": cfg.remediation_timeout},
     )

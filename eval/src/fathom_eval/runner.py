@@ -279,6 +279,7 @@ def _one_turn(
             "http_status": status,
             "outcome": outcome,
             "answer": (body or {}).get("answer"),
+            "remediation": (body or {}).get("remediation"),
             "steps": (body or {}).get("steps") or [],
             "tool_calls": len((body or {}).get("steps") or []),
             "elapsed_seconds": (body or {}).get(
@@ -289,7 +290,14 @@ def _one_turn(
         checks,
     )
 
-    failed = [c.name for c in checks if not c.passed]
+    # Sorted by category priority so a remediation failure -- the headline -- is the
+    # first name in the line, rather than whichever check happened to run first.
+    order = {name: i for i, name in enumerate(grading.CATEGORY_ORDER)}
+    failed = [
+        c.name
+        for c in sorted(checks, key=lambda c: order.get(c.category, len(order)))
+        if not c.passed
+    ]
     log.info(
         "  %s/%s #%d %s%s",
         fixture.name,

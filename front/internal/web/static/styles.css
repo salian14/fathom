@@ -210,6 +210,46 @@ body {
 
 .msg .body pre:last-child { margin-bottom: 0; }
 
+/* ------------------------------------------------------- remediation */
+
+/* The proposed fix sits above the prose and is accented, because it is the part
+   the reader acts on. When there is nothing to do it drops back to the muted
+   treatment -- a healthy cluster should not look like an incident. */
+.remediation {
+  margin-bottom: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--accent);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  overflow-wrap: anywhere;
+}
+
+.remediation .who { color: var(--accent); }
+
+.remediation.none {
+  border-color: var(--border);
+}
+
+.remediation.none .who { color: var(--text-dim); }
+
+.remediation p { margin: 0 0 8px; }
+.remediation p:last-child { margin-bottom: 0; }
+
+.remediation .target {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.remediation pre {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--bg);
+  overflow-x: auto;
+  font: 13px/1.5 var(--mono);
+}
+
 /* ------------------------------------------------------------------- meta */
 
 .meta {

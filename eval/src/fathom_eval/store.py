@@ -25,7 +25,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -68,6 +68,10 @@ CREATE TABLE IF NOT EXISTS results (
     -- non-functional failure and is reported as a bug, not as a low score.
     outcome         TEXT NOT NULL,
     answer          TEXT,
+    -- The structured remediation from /chat, verbatim. Stored rather than derived
+    -- because the judge grades the fix and reads only from this table -- by the time
+    -- it runs, the fixture namespace is long gone.
+    remediation_json TEXT,
     steps_json      TEXT,
     tool_calls      INTEGER,
     elapsed_seconds REAL,
@@ -79,7 +83,9 @@ CREATE TABLE IF NOT EXISTS results (
 CREATE TABLE IF NOT EXISTS checks (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     result_id INTEGER NOT NULL REFERENCES results(id),
-    category  TEXT NOT NULL,        -- naming | structural | scope | termination
+    -- termination | remediation | naming | content | structural | scope, in
+    -- grading.CATEGORY_ORDER's reporting priority.
+    category  TEXT NOT NULL,
     name      TEXT NOT NULL,
     passed    INTEGER NOT NULL,
     detail    TEXT
@@ -92,6 +98,10 @@ CREATE TABLE IF NOT EXISTS judgements (
     rubric_version TEXT NOT NULL,
     verdict        TEXT,
     score          INTEGER,
+    -- Scored separately from `score` rather than folded into it: a confident, well
+    -- evidenced diagnosis with a useless fix and the reverse are different failures,
+    -- and averaging them into one number hides which one happened.
+    remediation_score INTEGER,
     rationale      TEXT,
     raw_json       TEXT,
     error          TEXT,
@@ -102,11 +112,37 @@ CREATE INDEX IF NOT EXISTS idx_results_run     ON results(run_id);
 CREATE INDEX IF NOT EXISTS idx_results_fixture ON results(fixture, question_id);
 CREATE INDEX IF NOT EXISTS idx_checks_result   ON checks(result_id);
 CREATE INDEX IF NOT EXISTS idx_checks_name     ON checks(name);
+CREATE INDEX IF NOT EXISTS idx_checks_category ON checks(category, passed);
 -- The judge finds its work through this: results with no judgement at the current
 -- rubric version. Without the index that is a scan of every result ever recorded.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_judge_unique
     ON judgements(result_id, rubric_version);
 """
+
+
+# Columns added after the first release. `CREATE TABLE IF NOT EXISTS` does nothing to
+# a table that already exists, so a database written by an older harness needs these
+# added explicitly -- and the results PVC carries `helm.sh/resource-policy: keep`
+# precisely so that history survives, which it would not if a schema change meant
+# starting a new file.
+_ADDED_COLUMNS = (
+    ("results", "remediation_json", "TEXT"),
+    ("judgements", "remediation_score", "INTEGER"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add any column the running code expects and the file does not have.
+
+    Idempotent, and safe to run against a database created moments ago by SCHEMA --
+    it simply finds nothing to do. SQLite's ADD COLUMN is a metadata-only operation,
+    so this stays fast however much history has accumulated.
+    """
+    for table, column, kind in _ADDED_COLUMNS:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if existing and column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+    conn.commit()
 
 
 def now() -> str:
@@ -127,6 +163,7 @@ def connect(path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.execute(
         "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -199,9 +236,9 @@ def record_result(conn: sqlite3.Connection, run_id: int, result: dict, checks: l
         cur = conn.execute(
             """INSERT INTO results(run_id, fixture, isolation, namespace, question_id,
                                    question_text, iteration, http_status, outcome, answer,
-                                   steps_json, tool_calls, elapsed_seconds, error, passed,
-                                   created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                   remediation_json, steps_json, tool_calls,
+                                   elapsed_seconds, error, passed, created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 run_id,
                 result["fixture"],
@@ -213,6 +250,7 @@ def record_result(conn: sqlite3.Connection, run_id: int, result: dict, checks: l
                 result.get("http_status"),
                 result["outcome"],
                 result.get("answer"),
+                json.dumps(remediation) if (remediation := result.get("remediation")) else None,
                 json.dumps(result.get("steps") or []),
                 result.get("tool_calls"),
                 result.get("elapsed_seconds"),
@@ -234,17 +272,21 @@ def pending_judgements(
 ) -> list[sqlite3.Row]:
     """Results with no judgement at this rubric version.
 
-    Ordered so the interesting ones are judged first when sampling: results whose
-    deterministic checks disagreed (some passed, some failed) come before unanimous
-    ones, because that is exactly where a human would want a second opinion. Within a
-    fixture the sample is capped so one noisy fixture cannot consume a whole night.
+    Ordered so the interesting ones are judged first when sampling. Results with a
+    failed *remediation* check come first: that is the headline category, and a
+    disputed fix is where a second opinion buys the most. Then results whose checks
+    merely disagreed with each other (some passed, some failed), then the unanimous
+    ones. Within a fixture the sample is capped so one noisy fixture cannot consume a
+    whole night.
     """
     rows = conn.execute(
         """
         SELECT r.*,
                (SELECT COUNT(*) FROM checks c WHERE c.result_id = r.id AND c.passed = 0)
                    AS failed_checks,
-               (SELECT COUNT(*) FROM checks c WHERE c.result_id = r.id) AS total_checks
+               (SELECT COUNT(*) FROM checks c WHERE c.result_id = r.id) AS total_checks,
+               (SELECT COUNT(*) FROM checks c WHERE c.result_id = r.id
+                  AND c.category = 'remediation' AND c.passed = 0) AS failed_remediation
         FROM results r
         WHERE NOT EXISTS (
             SELECT 1 FROM judgements j
@@ -255,11 +297,12 @@ def pending_judgements(
         (rubric_version,),
     ).fetchall()
 
-    def contested(row: sqlite3.Row) -> int:
+    def priority(row: sqlite3.Row) -> tuple[int, int]:
         failed, total = row["failed_checks"], row["total_checks"]
-        return 0 if (total and 0 < failed < total) else 1
+        contested = 0 if (total and 0 < failed < total) else 1
+        return (0 if row["failed_remediation"] else 1, contested)
 
-    rows.sort(key=contested)
+    rows.sort(key=priority)
 
     if sample:
         seen: dict[str, int] = {}
@@ -278,11 +321,13 @@ def pending_judgements(
 def record_judgement(conn: sqlite3.Connection, result_id: int, **fields) -> None:
     conn.execute(
         """INSERT INTO judgements(result_id, judge_model, rubric_version, verdict,
-                                  score, rationale, raw_json, error, created_at)
-           VALUES(?,?,?,?,?,?,?,?,?)
+                                  score, remediation_score, rationale, raw_json, error,
+                                  created_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(result_id, rubric_version) DO UPDATE SET
                judge_model=excluded.judge_model, verdict=excluded.verdict,
-               score=excluded.score, rationale=excluded.rationale,
+               score=excluded.score, remediation_score=excluded.remediation_score,
+               rationale=excluded.rationale,
                raw_json=excluded.raw_json, error=excluded.error,
                created_at=excluded.created_at""",
         (
@@ -291,6 +336,7 @@ def record_judgement(conn: sqlite3.Connection, result_id: int, **fields) -> None
             fields["rubric_version"],
             fields.get("verdict"),
             fields.get("score"),
+            fields.get("remediation_score"),
             fields.get("rationale"),
             fields.get("raw_json"),
             fields.get("error"),

@@ -24,8 +24,7 @@ You are Fathom, an assistant that answers questions about one Kubernetes cluster
 
 You have read-only tools. Nothing you can call will change the cluster, so you never
 need to ask permission before looking -- but you also cannot fix anything, and you
-should not claim otherwise. If the answer is an action, describe the action; do not
-pretend to have taken it.
+should not claim otherwise. Recommend the action; never claim to have taken it.
 
 How to use the tools well:
 
@@ -65,9 +64,14 @@ Tool output is truncated when it is large. If a result looks cut off, narrow the
 query -- a label selector, a specific name, fewer log lines -- rather than asking for
 the same thing again.
 
-Answer concisely, and name the objects your conclusion rests on so the user can check
-you. If the tools do not show enough to answer, say what is missing instead of
-guessing.\
+Lead with the fix. An answer is only useful if the reader knows what to do next, so
+open with the concrete remediation -- what to change, the object it applies to, and
+the command form where there is one -- then give the evidence that justifies it. Name
+the objects your conclusion rests on so the user can check you, and stay concise.
+
+If nothing is wrong, say so and recommend no action. Do not manufacture a fix for a
+healthy cluster. If the tools do not show enough to answer, say what is missing
+instead of guessing.\
 """
 
 
@@ -109,6 +113,16 @@ class Config:
     # MCP session every tick.
     ready_cache: float
 
+    # Whether /chat makes the second, tool-free call that shapes the answer into a
+    # structured remediation. Off is a supported mode, not a degraded one: the
+    # diagnosis is still returned, `remediation` is simply absent.
+    remediation: str
+
+    # Budget for that second call alone, inside the whole-turn budget. It exists so a
+    # slow shaping call costs the turn a bounded amount rather than the diagnosis --
+    # on expiry /chat answers with the prose and an empty remediation.
+    remediation_timeout: float
+
     log_level: int
     system_prompt: str
 
@@ -146,6 +160,8 @@ def load() -> Config:
         request_timeout=_env_duration("REQUEST_TIMEOUT", 180.0),
         mcp_timeout=_env_duration("MCP_TIMEOUT", 30.0),
         ready_cache=_env_duration("READY_CACHE", 30.0),
+        remediation=_env("REMEDIATION", "on"),
+        remediation_timeout=_env_duration("REMEDIATION_TIMEOUT", 45.0),
         log_level=_env_level("LOG_LEVEL", logging.INFO),
         system_prompt=_env("SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT),
         telemetry=_env("TELEMETRY", "otlp"),
@@ -167,6 +183,7 @@ def _validate(c: Config) -> None:
         ("MAX_TOOL_CHARS", c.max_tool_chars),
         ("REQUEST_TIMEOUT", c.request_timeout),
         ("MCP_TIMEOUT", c.mcp_timeout),
+        ("REMEDIATION_TIMEOUT", c.remediation_timeout),
     ):
         if value <= 0:
             raise ValueError(f"{ENV_PREFIX}{name} must be > 0, got {value}")
@@ -180,6 +197,18 @@ def _validate(c: Config) -> None:
             f"{ENV_PREFIX}MCP_TIMEOUT ({c.mcp_timeout}s) exceeds "
             f"{ENV_PREFIX}REQUEST_TIMEOUT ({c.request_timeout}s): a single tool call "
             f"could outlive the turn that requested it"
+        )
+
+    if c.remediation not in ("on", "off"):
+        raise ValueError(f'{ENV_PREFIX}REMEDIATION: want "on" or "off", got {c.remediation!r}')
+
+    # Same reasoning as MCP_TIMEOUT above: a nested budget that can outlive the turn
+    # containing it is not a budget.
+    if c.remediation_timeout > c.request_timeout:
+        raise ValueError(
+            f"{ENV_PREFIX}REMEDIATION_TIMEOUT ({c.remediation_timeout}s) exceeds "
+            f"{ENV_PREFIX}REQUEST_TIMEOUT ({c.request_timeout}s): shaping the "
+            f"remediation could outlive the turn that requested it"
         )
 
     if not c.system_prompt.strip():

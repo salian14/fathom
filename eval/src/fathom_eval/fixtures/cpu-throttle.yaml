@@ -50,10 +50,15 @@ questions:
   - id: q1
     text: >-
       The busy-app pod in the {{ namespace }} namespace is Running but its work is
-      going slowly. Is it being limited by anything?
+      going slowly. Is it being limited by anything, and what should I do about it?
     expect:
       names: [busy-app]
       namespace: true
       tools_any: [run_promql, describe_metric, list_metrics, k8s_get, k8s_describe]
       keywords_any: ["throttl", "cpu limit", "cpu quota", "limited", "100m", "quota"]
       must_not_claim_mutation: true
+      remediation:
+        required: true
+        any: ["cpu limit", "cpu", "limit", "100m", "quota", "resources"]
+        none: ["memory limit", "image tag", "configmap", "nodeSelector"]
+        target_any: [busy-app]

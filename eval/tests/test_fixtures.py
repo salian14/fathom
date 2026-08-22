@@ -126,3 +126,64 @@ def test_chart_rbac_lists_exactly_the_fixture_namespaces():
     values = Path(__file__).resolve().parents[1] / "helm" / "values.yaml"
     declared = set(yaml.safe_load(values.read_text())["rbac"]["fixtureNamespaces"])
     assert declared == {f.namespace for f in FIXTURES}
+
+
+# --------------------------------------------------------------------------
+# remediation ground truth
+# --------------------------------------------------------------------------
+
+# Fixtures deliberately not graded on a remediation. `prom-restarts` asks an
+# informational question -- "how many restarts, per the metrics" -- and is not an
+# incident; requiring a fix would change what the fixture measures. Anything else
+# added here needs the same kind of justification, which is the point of the list.
+NO_REMEDIATION = {"prom-restarts"}
+
+
+@pytest.mark.parametrize("fixture", load_all(), ids=lambda f: f.name)
+def test_every_fixture_decides_about_remediation(fixture: Fixture):
+    for question in fixture.questions:
+        declared = "remediation" in question.expect
+        if fixture.name in NO_REMEDIATION:
+            assert not declared, f"{fixture.name} is on the exempt list but declares one"
+        else:
+            assert declared, (
+                f"{fixture.name}/{question.id} grades no remediation. Declare one, or "
+                f"add the fixture to NO_REMEDIATION with a reason."
+            )
+
+
+@pytest.mark.parametrize("fixture", load_all(), ids=lambda f: f.name)
+def test_remediation_blocks_are_well_formed(fixture: Fixture):
+    allowed = {"required", "any", "none", "target_any"}
+    for question in fixture.questions:
+        block = question.expect.get("remediation")
+        if not block:
+            continue
+        assert not set(block) - allowed, f"unknown keys: {set(block) - allowed}"
+        assert isinstance(block["required"], bool), "required must be a bool"
+        for key in ("any", "none", "target_any"):
+            assert all(isinstance(v, str) and v.strip() for v in block.get(key) or [])
+
+        if block["required"]:
+            assert block.get("any"), "a required fix needs vocabulary that identifies it"
+            assert block.get("target_any"), "a required fix needs an object it applies to"
+        else:
+            # Nothing to match when the correct answer is "no action". The forbidden
+            # list is what does the work: it catches a model that proposes one anyway.
+            assert block.get("none"), "an expected no-op needs a forbidden list"
+            assert not block.get("any"), "keywords are not graded when no fix is expected"
+
+
+@pytest.mark.parametrize("fixture", load_all(), ids=lambda f: f.name)
+def test_a_required_fix_asks_the_question_that_calls_for_it(fixture: Fixture):
+    # Grading a fix the question never asked for measures an unprompted behaviour.
+    # The two `required: false` fixtures are exempt: healthy and secret-bait must not
+    # be led towards proposing one.
+    for question in fixture.questions:
+        block = question.expect.get("remediation")
+        if not block or not block["required"]:
+            continue
+        text = question.text.casefold()
+        assert "fix it" in text or "do about it" in text, (
+            f"{fixture.name}/{question.id} grades a remediation but does not ask for one"
+        )

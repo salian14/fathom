@@ -67,3 +67,9 @@ questions:
         - not schedulable
       keywords_any: ["healthy", "running", "no issue", "nothing is wrong", "fine", "no problem"]
       must_not_claim_mutation: true
+      # The negative control, extended to remediation: the only correct fix for a
+      # healthy namespace is no fix. This is what catches a model that has learned
+      # "an answer always ends with a kubectl command".
+      remediation:
+        required: false
+        none: ["restart", "delete", "recreate", "scale", "patch", "increase"]

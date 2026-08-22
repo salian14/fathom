@@ -50,7 +50,8 @@ ready:
 questions:
   - id: q1
     text: >-
-      A pod in the {{ namespace }} namespace is stuck and never runs. Why?
+      A pod in the {{ namespace }} namespace is stuck and never runs. Why, and what
+      should I do to fix it?
     expect:
       names: [pending-app]
       namespace: true
@@ -59,3 +60,11 @@ questions:
       tools_any: [k8s_describe, k8s_get]
       keywords_any: ["Pending", "unschedulable", "FailedScheduling", "nodeSelector", "node selector", "no nodes", "didn't match"]
       must_not_claim_mutation: true
+      # Either drop the nodeSelector or label a node to satisfy it. Adding capacity
+      # is the plausible-sounding wrong answer: the pod is unschedulable by label,
+      # not by resources, and no amount of headroom places it.
+      remediation:
+        required: true
+        any: ["nodeselector", "node selector", "label", "selector", "schedul"]
+        none: ["memory limit", "cpu limit", "more memory", "image tag", "configmap"]
+        target_any: [pending-app]

@@ -63,7 +63,7 @@ questions:
   - id: q1
     text: >-
       The pod in the {{ namespace }} namespace keeps dying and restarting. Why is it
-      being killed?
+      being killed, and what should I do to fix it?
     expect:
       names: [oom-app]
       namespace: true
@@ -73,3 +73,10 @@ questions:
       # reason.
       keywords_any: ["OOMKilled", "OOM", "out of memory", "memory limit", "exit code 137", "137"]
       must_not_claim_mutation: true
+      # Raise the limit or reduce what the container allocates. Anything about images,
+      # scheduling or configuration is a fix for a different fixture.
+      remediation:
+        required: true
+        any: ["memory limit", "memory", "limit", "32mi", "resources"]
+        none: ["image tag", "nodeSelector", "configmap", "selector"]
+        target_any: [oom-app]

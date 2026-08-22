@@ -26,9 +26,9 @@ from opentelemetry.instrumentation.utils import suppress_instrumentation
 from pydantic import BaseModel, Field
 
 from . import __version__, telemetry
-from .agent import build_graph, build_messages, summarise
+from .agent import build_graph, build_messages, shape_remediation, summarise
 from .config import Config, load
-from .llm import build_model
+from .llm import build_model, build_shaper
 from .mcp_client import build_client, tool_session, untraced_tool_session
 
 log = logging.getLogger("fathom_agent")
@@ -60,10 +60,20 @@ def _record_turn(span, outcome: str, started: float, err: Exception | None = Non
     _turn_duration.record(time.monotonic() - started, {"outcome": outcome})
 
 
+def _shaping_status(remediation: dict | None, error: str) -> str:
+    """ok | skipped | timeout | error -- a closed set, safe as a span dimension."""
+    if remediation is not None:
+        return "ok"
+    if not error:
+        return "skipped"
+    return "timeout" if error.startswith("shaping exceeded") else "error"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cfg: Config = app.state.cfg
     app.state.model = build_model(cfg)
+    app.state.shaper = build_shaper(cfg)
     app.state.mcp = build_client(cfg)
 
     log.info(
@@ -136,10 +146,33 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
             answer, steps = summarise(result)
             span.set_attribute("fathom.chat.iterations", len(steps))
+
+            # A second model call, so it gets its own span -- and its own timeout,
+            # nested inside the turn's. A failure here never fails the turn: the
+            # diagnosis is already in hand and is worth returning without a fix
+            # attached. `remediation_error` is what tells the caller which of the two
+            # empty-remediation cases it is looking at.
+            remediation, remediation_error = None, ""
+            with telemetry.tracer().start_as_current_span("agent.remediation") as shaping:
+                shaping.set_attribute("gen_ai.request.model", cfg.model)
+                shaping.set_attribute("gen_ai.system", "ollama")
+                try:
+                    async with asyncio.timeout(cfg.remediation_timeout):
+                        remediation, remediation_error = await shape_remediation(
+                            cfg, app.state.shaper, request.question, answer
+                        )
+                except TimeoutError:
+                    remediation_error = f"shaping exceeded {cfg.remediation_timeout:g}s"
+                shaping.set_attribute(
+                    "fathom.remediation.status", _shaping_status(remediation, remediation_error)
+                )
+
             _record_turn(span, "ok", started)
 
         return {
             "answer": answer,
+            "remediation": remediation,
+            "remediation_error": remediation_error or None,
             "steps": steps,
             "iterations": len(steps),
             "model": cfg.model,
