@@ -6,8 +6,8 @@ description: >-
   Service that lets an in-cluster pod reach the model server on the host.
 type: application
 
-version: 0.5.2
-appVersion: "0.5.2"
+version: 0.5.3
+appVersion: "0.5.3"
 
 keywords:
   - fathom
