@@ -165,6 +165,19 @@ body {
   min-width: 0;
 }
 
+#chat-view,
+#eval-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+#eval-view {
+  overflow-y: auto;
+}
+
 #thread {
   flex: 1;
   min-height: 0;
@@ -351,7 +364,154 @@ body {
   font-size: 12px;
 }
 
+/* ---------------------------------------------------------------- evals view */
+
+/* The switcher lives in #main rather than the sidebar, which is display:none
+   under 720px -- a switcher in there would be unreachable on a phone. */
+#view-switcher {
+  display: flex;
+  gap: 4px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+#view-switcher a {
+  padding: 4px 12px;
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: 13px;
+}
+
+#view-switcher a:hover { background: var(--bg-raised); color: var(--text); }
+
+#view-switcher a[aria-current="page"] {
+  background: var(--bg-raised);
+  color: var(--text);
+}
+
+.eval-page { padding: 16px; }
+
+/* Wider than the 780px the chat uses. That measure is for reading prose; a table
+   of ten fixtures is scanned, and cramping it helps nobody. */
+.eval-page > h2,
+.eval-page > h3,
+.eval-page > p,
+.eval-crumb,
+.eval-head { max-width: 1100px; }
+
+.eval-page h2 { font-size: 18px; margin: 0 0 12px; }
+.eval-page h3 { font-size: 14px; margin: 24px 0 8px; color: var(--text-dim); font-weight: 600; }
+
+.eval-crumb { display: flex; gap: 8px; font-size: 13px; margin-bottom: 12px; }
+.eval-crumb a { color: var(--accent); text-decoration: none; }
+.eval-crumb a:hover { text-decoration: underline; }
+.eval-crumb .sep { color: var(--text-dim); }
+
+.eval-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+.eval-head h2 { margin: 0; }
+.eval-page .dim { color: var(--text-dim); font-size: 13px; }
+.eval-page .error { color: var(--error); }
+.warn-text { color: var(--warn); }
+
+.eval-empty { padding: 32px 16px; color: var(--text-dim); }
+.eval-empty h2 { color: var(--text); font-size: 16px; margin: 0 0 8px; }
+
+/* Tables scroll inside their own box so the page never scrolls sideways. */
+.eval-scroll { overflow-x: auto; max-width: 1100px; margin-bottom: 8px; }
+
+.eval-table {
+  border-collapse: collapse;
+  font-size: 13px;
+  width: 100%;
+}
+
+.eval-table th {
+  text-align: left;
+  padding: 6px 12px 6px 0;
+  color: var(--text-dim);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.eval-table td {
+  padding: 6px 12px 6px 0;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.eval-table tr:hover td { background: var(--bg-raised); }
+.eval-table a { color: var(--accent); text-decoration: none; }
+.eval-table a:hover { text-decoration: underline; }
+.eval-table code { font-family: var(--mono); font-size: 12px; }
+
+.eval-bar {
+  width: 80px;
+  height: 6px;
+  background: var(--bg-input);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 5px;
+}
+
+.eval-bar-fill { height: 100%; background: var(--text-dim); }
+.eval-bar-fill.ok { background: var(--ok); }
+.eval-bar-fill.partial { background: var(--warn); }
+.eval-bar-fill.bad { background: var(--error); }
+
+/* Same three semantic colours the status dot and the step list already use:
+   --ok pass, --error fail, --warn a real but non-fatal anomaly. */
+.pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--bg-input);
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.pill.ok { color: var(--ok); }
+.pill.error { color: var(--error); }
+.pill.warn { color: var(--warn); }
+
+.outcomes { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+
+.eval-question {
+  font-style: italic;
+  color: var(--text-dim);
+  max-width: 780px;
+}
+
+.eval-answer { max-width: 780px; }
+
+.judgement {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  max-width: 780px;
+}
+
+.judgement-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 6px; }
+.judgement p { margin: 4px 0 0; font-size: 14px; }
+
+/* The sidebar's second list, shown on the eval view in place of the chat list. */
+#run-list a {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+#run-list .run-id { font-weight: 600; }
+#run-list .run-when { color: var(--text-dim); font-size: 11px; flex: 1; }
+#run-list .run-rate { color: var(--text-dim); font-size: 11px; font-family: var(--mono); }
+
 @media (max-width: 720px) {
   #app { grid-template-columns: 1fr; }
   #sidebar { display: none; }
+  /* The switcher is in #main, so it survives the sidebar going away. */
+  .eval-page { padding: 12px; }
 }

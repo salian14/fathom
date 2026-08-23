@@ -16,64 +16,14 @@ import path from 'node:path';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 
-// Values built inside the vm realm have that realm's prototypes, so
-// deepStrictEqual rejects structurally identical objects. Compare as JSON.
-const same = (a, b, msg) => assert.equal(JSON.stringify(a), JSON.stringify(b), msg);
+import { makeContext, mkEl, same, textOf, check, report } from './domstub.mjs';
 
-// Minimal DOM stub -- enough that app.js can load, wire itself up and render.
-// If the render path touches something that is not here, this throws, which is
-// itself the point.
-function mkEl(tag = 'div') {
-  const el = {
-    tagName: tag, children: [], _text: '', style: {}, dataset: {},
-    className: '', title: '', value: '', disabled: false, hidden: false,
-    scrollTop: 0, scrollHeight: 0, type: '',
-    append(...n) { this.children.push(...n); },
-    replaceChildren(...n) { this.children = n; },
-    remove() {},
-    addEventListener() {},
-    setAttribute() {},
-    hasChildNodes() { return this.children.length > 0; },
-    requestSubmit() {},
-    focus() {},
-  };
-  Object.defineProperty(el, 'textContent', {
-    get() { return this._text; },
-    set(v) { this._text = String(v); this.children = []; },
-  });
-  return el;
-}
-
-const ids = {};
-const ctx = {
-  console,
-  document: {
-    createElement: (t) => mkEl(t),
-    createTextNode: (t) => ({ nodeType: 3, textContent: String(t) }),
-    getElementById: (id) => (ids[id] ||= mkEl()),
-  },
-  localStorage: {
-    store: {},
-    getItem(k) { return k in this.store ? this.store[k] : null; },
-    setItem(k, v) { this.store[k] = String(v); },
-    removeItem(k) { delete this.store[k]; },
-  },
-  crypto: { randomUUID: () => 'id-' + Math.random().toString(16).slice(2) },
-  fetch: async () => ({ ok: true, status: 200, text: async () => 'ok' }),
-  setInterval: () => 0,
-  setTimeout: () => 0,
-  clearInterval: () => {},
-  clearTimeout: () => {},
-  AbortController: class { constructor() { this.signal = {}; } abort() {} },
-  Date, Math, JSON, String, Object, Array, Error, Promise,
-};
-ctx.globalThis = ctx;
+// The DOM stub lives in domstub.mjs so this file and evals_test.mjs cannot drift
+// apart on what the page looks like.
+const ctx = makeContext();
 vm.createContext(ctx);
 const here = path.dirname(fileURLToPath(import.meta.url));
 vm.runInContext(readFileSync(path.join(here, 'static', 'app.js'), 'utf8'), ctx);
-
-let pass = 0;
-const check = (name, fn) => { fn(); console.log('  ok  ' + name); pass++; };
 
 // --- buildHistory ---------------------------------------------------------
 
@@ -216,10 +166,6 @@ check('corrupt storage is survivable', () => {
 
 // Flatten a rendered node to the text it would show, so a check can assert on
 // content without knowing the element tree.
-const textOf = (node) =>
-  node.children.length
-    ? node.children.map(textOf).join(' ')
-    : String(node.textContent || '');
 
 check('renders the proposed fix, its target and its commands', () => {
   const node = ctx.remediationNode({
@@ -279,4 +225,4 @@ check('the remediation never goes back on the wire', () => {
   ]);
 });
 
-console.log('\n' + pass + ' checks passed');
+report();

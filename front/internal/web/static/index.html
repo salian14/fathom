@@ -15,6 +15,7 @@
       <button id="new-chat" type="button">New chat</button>
     </header>
     <nav><ul id="chat-list"></ul></nav>
+    <nav><ul id="run-list" hidden></ul></nav>
     <footer class="sidebar-foot">
       <span id="status-dot" class="dot" data-state="unknown" aria-hidden="true"></span>
       <span id="status-text">checking…</span>
@@ -22,17 +23,36 @@
   </aside>
 
   <main id="main">
-    <div id="thread" role="log" aria-live="polite" aria-label="Conversation"></div>
+    <!-- Inside #main, not the sidebar. #app is a two-column grid with exactly two
+         children, so a third would break the layout -- and the sidebar is display:none
+         under 720px, which would make the switcher unreachable on a phone. -->
+    <nav id="view-switcher">
+      <a id="view-chat" href="#/" aria-current="page">Chat</a>
+      <!-- Ships hidden. evals.js unhides it only when /api/features says the eval
+           service is configured, so an install without one never flashes a view that
+           is not there. -->
+      <a id="view-evals" href="#/evals" hidden>Evals</a>
+    </nav>
 
-    <form id="composer" autocomplete="off">
-      <textarea id="question" rows="1" placeholder="Ask about the cluster…"
-                aria-label="Your question"></textarea>
-      <button id="send" type="submit">Ask</button>
-      <button id="stop" type="button" hidden>Stop</button>
-    </form>
-    <p id="hint">Enter sends · Shift+Enter for a newline · answers take 30–180s</p>
+    <div id="chat-view">
+      <div id="thread" role="log" aria-live="polite" aria-label="Conversation"></div>
+
+      <form id="composer" autocomplete="off">
+        <textarea id="question" rows="1" placeholder="Ask about the cluster…"
+                  aria-label="Your question"></textarea>
+        <button id="send" type="submit">Ask</button>
+        <button id="stop" type="button" hidden>Stop</button>
+      </form>
+      <p id="hint">Enter sends · Shift+Enter for a newline · answers take 30–180s</p>
+    </div>
+
+    <div id="eval-view" hidden></div>
   </main>
 </div>
+<!-- Order matters and is pinned by a Go test: evals.js calls app.js's rendering
+     helpers, and both are classic scripts sharing one global scope. Reversing these
+     two lines fails at runtime with a bare ReferenceError and nothing else catches it. -->
 <script src="app.js"></script>
+<script src="evals.js"></script>
 </body>
 </html>

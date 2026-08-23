@@ -89,7 +89,7 @@ check: fmt lint test test-ui lint-chart
 .PHONY: test-ui
 test-ui:
 	@command -v node >/dev/null 2>&1 || { echo "node not installed, skipping UI checks"; exit 0; }; \
-	node internal/web/app_test.mjs
+	node internal/web/app_test.mjs && node internal/web/evals_test.mjs
 
 .PHONY: image
 image:
