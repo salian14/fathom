@@ -44,6 +44,19 @@ JOB            ?= run
 # 8080 mcp, 8081 agent, 8082 front, 8083 here.
 SERVE_PORT ?= 8083
 
+# Every pod in the namespace used to carry only app.kubernetes.io/name=fathom-eval, which
+# was fine while they were all Jobs. The read service is a Deployment and is therefore
+# always Running, so the two selectors below have to tell them apart:
+#
+#   run-now's "is an evaluation already in flight?" guard would be true forever.
+#   db-pull's "newest pod" would be the read service rather than the last run.
+#
+# db-pull actually gets better out of this. It used to pick a Terminated Job pod, which
+# `kubectl cp` cannot copy from; the read service is always up and always has /data
+# mounted. The batch selector stays as the fallback for serve.enabled=false.
+BATCH_SELECTOR ?= app.kubernetes.io/name=fathom-eval,app.kubernetes.io/component!=serve
+SERVE_SELECTOR ?= app.kubernetes.io/name=fathom-eval,app.kubernetes.io/component=serve
+
 .PHONY: help
 help:
 	@echo "fathom-eval targets"
@@ -182,7 +195,7 @@ run-now:
 	  judge) cron=fathom-eval-judge;; \
 	  *)     echo "error: JOB must be 'run' or 'judge', got '$(JOB)'"; exit 1;; \
 	 esac; \
-	 busy=$$(kubectl -n $(FATHOM_EVAL_NS) get pods -l app.kubernetes.io/name=fathom-eval \
+	 busy=$$(kubectl -n $(FATHOM_EVAL_NS) get pods -l $(BATCH_SELECTOR) \
 	   -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name} {end}{range .items[?(@.status.phase=="Pending")]}{.metadata.name} {end}'); \
 	 if [ -n "$$busy" ]; then \
 	   echo "error: fathom-eval is already busy: $$busy"; \
@@ -207,8 +220,12 @@ run-serve: venv
 
 .PHONY: db-pull
 db-pull:
-	@pod=$$(kubectl -n $(FATHOM_EVAL_NS) get pods -l app.kubernetes.io/name=fathom-eval \
-	         --sort-by=.metadata.creationTimestamp -o name | tail -1); \
+	@pod=$$(kubectl -n $(FATHOM_EVAL_NS) get pods -l $(SERVE_SELECTOR) \
+	         --field-selector=status.phase=Running -o name | tail -1); \
+	 if [ -z "$$pod" ]; then \
+	   pod=$$(kubectl -n $(FATHOM_EVAL_NS) get pods -l $(BATCH_SELECTOR) \
+	           --sort-by=.metadata.creationTimestamp -o name | tail -1); \
+	 fi; \
 	 if [ -z "$$pod" ]; then echo "error: no fathom-eval pod found -- has a run completed?"; exit 1; fi; \
 	 echo "==> copying results.db from $$pod"; \
 	 kubectl -n $(FATHOM_EVAL_NS) cp "$${pod#pod/}:/data/results.db" ./results.db

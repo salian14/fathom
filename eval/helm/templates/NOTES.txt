@@ -29,7 +29,21 @@ Trigger a run by hand without waiting for the schedule:
 
   kubectl -n {{ include "fathom-eval.namespace" . }} create job --from=cronjob/{{ include "fathom-eval.fullname" . }} eval-manual-1
 
-Read the results (the PVC is node-pinned, so copy it out rather than hunting for it):
+{{ if .Values.serve.enabled }}
+Read the results in a browser, via fathom-front's eval view. Point that chart at:
+
+  http://{{ include "fathom-eval.serveFullname" . }}.{{ include "fathom-eval.namespace" . }}.svc.cluster.local:{{ .Values.serve.service.port }}
+
+set as front/helm/values.yaml -> eval.url. It is ClusterIP only: the API is
+unauthenticated and serves the agent's answers verbatim, so it does not go on the node
+network. To poke it by hand:
+
+  kubectl -n {{ include "fathom-eval.namespace" . }} port-forward svc/{{ include "fathom-eval.serveFullname" . }} 8083:{{ .Values.serve.service.port }}
+  curl -s localhost:8083/runs
+
+{{ end }}
+Or read the database directly (the PVC is node-pinned, so copy it out rather than
+hunting for it):
 
   make -C eval db-pull
   sqlite3 results.db "select fixture, outcome, count(*) from results group by 1,2"
