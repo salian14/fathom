@@ -8,7 +8,7 @@
 #   run-local version clean all
 #
 # Anything beyond that list is component-specific and named so: `venv`, `lock`,
-# `lock-check`, `run-judge`, `run-now` and `db-pull` here; `run-stdio` in mcp;
+# `lock-check`, `run-judge`, `run-now`, `run-serve` and `db-pull` here; `run-stdio` in mcp;
 # `test-ui` in front.
 #
 # `build` is the venv rather than a compile step, matching agent/: this component
@@ -40,6 +40,10 @@ ITERATIONS ?= 2
 FATHOM_EVAL_NS ?= fathom-eval
 JOB            ?= run
 
+# `make run-serve` continues the port allocation the other components document:
+# 8080 mcp, 8081 agent, 8082 front, 8083 here.
+SERVE_PORT ?= 8083
+
 .PHONY: help
 help:
 	@echo "fathom-eval targets"
@@ -56,6 +60,7 @@ help:
 	@echo "  make run-local      run an eval against $(AGENT_URL), db $(LOCAL_DB)"
 	@echo "  make run-judge      run the judge pass against $(JUDGE_URL) (component-specific)"
 	@echo "  make run-now        fire the in-cluster CronJob once, now (component-specific)"
+	@echo "  make run-serve      serve $(LOCAL_DB) read-only on :$(SERVE_PORT) (component-specific)"
 	@echo "  make db-pull        copy the CronJob's results.db out of the cluster (component-specific)"
 	@echo "  make lock           regenerate requirements.lock (component-specific, needs Docker)"
 	@echo "  make lock-check     fail if the lock is older than pyproject.toml (component-specific)"
@@ -65,7 +70,7 @@ help:
 	@echo
 	@echo "Knobs:  VERSION=x.y.z  REGISTRY=<host:port>  IMAGE=<ref>"
 	@echo "        AGENT_URL=<url>  JUDGE_URL=<url>  LOCAL_DB=<path>"
-	@echo "        FIXTURES=a,b  ITERATIONS=$(ITERATIONS)  JOB=run|judge"
+	@echo "        FIXTURES=a,b  ITERATIONS=$(ITERATIONS)  JOB=run|judge  SERVE_PORT=$(SERVE_PORT)"
 	@echo
 	@echo "Version: $(VERSION)"
 
@@ -191,6 +196,15 @@ run-now:
 
 # The results PVC is node-pinned by local-path, so the database is only directly
 # readable from one node. This copies it out to wherever you are instead.
+# Serves whatever LOCAL_DB points at, so `make db-pull LOCAL_DB=./results.db` then
+# `make run-serve LOCAL_DB=./results.db` inspects a real night's results on a
+# workstation with no cluster, no agent and no model running.
+.PHONY: run-serve
+run-serve: venv
+	@FATHOM_EVAL_TELEMETRY=console \
+	 FATHOM_EVAL_SERVE_ADDR=:$(SERVE_PORT) \
+	 $(PY) -m fathom_eval serve --db $(LOCAL_DB)
+
 .PHONY: db-pull
 db-pull:
 	@pod=$$(kubectl -n $(FATHOM_EVAL_NS) get pods -l app.kubernetes.io/name=fathom-eval \

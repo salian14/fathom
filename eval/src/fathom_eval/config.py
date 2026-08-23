@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, replace
 from urllib.parse import urlparse
 
@@ -23,6 +24,11 @@ ENV_PREFIX = "FATHOM_EVAL_"
 # name), so the second limit lives here, in code, the same way fathom-mcp checks
 # allowedNamespaces itself rather than trusting RBAC alone.
 NAMESPACE_PREFIX = "fathom-eval-"
+
+# ":8080" or "127.0.0.1:8080". Deliberately the same rule, spelled the same way, as
+# front/internal/config/config.go's addrPattern and the agent's FATHOM_AGENT_ADDR, so a
+# listen address means one thing across the repo.
+_ADDR_PATTERN = re.compile(r"^[^:]*:\d+$")
 
 
 @dataclass(frozen=True)
@@ -43,6 +49,9 @@ class Config:
     judge_model: str
     judge_sample: int
     judge_timeout: float
+
+    serve_addr: str
+    serve_max_rows: int
 
     log_level: int
     telemetry: str
@@ -80,6 +89,11 @@ def load() -> Config:
         # A 31B on CPU is slow by design; a judgment that takes four minutes is
         # working, not hung.
         judge_timeout=_env_duration("JUDGE_TIMEOUT", 900.0),
+        serve_addr=_env("SERVE_ADDR", ":8080"),
+        # A hard cap on rows in one response, so a pathological run cannot produce a
+        # multi-megabyte body. List responses carry no free text anyway; this bounds the
+        # row count on top of that.
+        serve_max_rows=_env_int("SERVE_MAX_ROWS", 500),
         log_level=_env_level("LOG_LEVEL", logging.INFO),
         telemetry=_env("TELEMETRY", "otlp"),
     )
@@ -116,6 +130,16 @@ def _validate(c: Config) -> None:
         raise ValueError(f"{ENV_PREFIX}DB_PATH must not be empty")
     if not c.judge_model.strip():
         raise ValueError(f"{ENV_PREFIX}JUDGE_MODEL must not be empty")
+
+    if not _ADDR_PATTERN.match(c.serve_addr):
+        raise ValueError(
+            f'{ENV_PREFIX}SERVE_ADDR must be "host:port" or ":port", got {c.serve_addr!r}'
+        )
+    port = int(c.serve_addr.rsplit(":", 1)[1])
+    if not 1 <= port <= 65535:
+        raise ValueError(f"{ENV_PREFIX}SERVE_ADDR port must be 1-65535, got {port}")
+    if c.serve_max_rows < 1:
+        raise ValueError(f"{ENV_PREFIX}SERVE_MAX_ROWS must be at least 1, got {c.serve_max_rows}")
 
     for name, value in (
         ("REQUEST_TIMEOUT", c.request_timeout),
