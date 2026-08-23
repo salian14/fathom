@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Status
 
 Phase 1 is built. All four deliverables exist and are deployable: `ollama/`, `agent/` (Python),
-`mcp/` (Go) and `front/` (Go). All three in-cluster services carry OpenTelemetry
-instrumentation.
+`mcp/` (Go) and `front/` (Go). The three in-cluster services all carry OpenTelemetry
+instrumentation, as does `eval/` — see [Telemetry](#telemetry) for the one way `eval/`
+differs.
 
 `eval/` (Python) is the evaluation harness, added after Phase 1: it stages known-broken
 workloads in disposable namespaces, asks the agent about them, and grades the answers
@@ -129,13 +130,16 @@ A new target that belongs to all four goes into all four, or it is not part of t
 
 ## Telemetry
 
-All three in-cluster services export OTLP traces and metrics over **gRPC** to
-`otel-collector.observability.svc.cluster.local:4317`, plaintext. Logs are not exported — they stay
-on stdout and carry `trace_id`/`span_id` for correlation.
+The three services on the request path export OTLP traces and metrics over **gRPC** to
+`otel-collector.observability.svc.cluster.local:4317`, plaintext. `fathom-eval` exports **traces
+only** — it builds a TracerProvider and no MeterProvider, because a batch job has no steady state
+for an export interval to describe and the numbers it produces belong in `results.db`. Do not
+"fix" that by adding a meter. Logs are not exported anywhere — they stay on stdout and carry
+`trace_id`/`span_id` for correlation.
 
 Configuration is the standard `OTEL_*` environment variables, read by the SDKs directly. The one
-exception is `FATHOM_AGENT_TELEMETRY` / `FATHOM_MCP_TELEMETRY` / `FATHOM_FRONT_TELEMETRY`
-(`otlp` | `console` | `off`), which picks the exporter rather than tuning one. `console` writes to **stderr** and needs no collector —
+exception is `FATHOM_AGENT_TELEMETRY` / `FATHOM_MCP_TELEMETRY` / `FATHOM_FRONT_TELEMETRY` /
+`FATHOM_EVAL_TELEMETRY` (`otlp` | `console` | `off`), which picks the exporter rather than tuning one. `console` writes to **stderr** and needs no collector —
 use it for local runs, and note that stdout is unusable for this in `mcp` because the stdio
 transport carries JSON-RPC there.
 

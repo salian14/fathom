@@ -5,15 +5,17 @@ model at a set of read-only tools. You ask "which pods are not running, and why?
 browser; a model running on your own hardware decides which cluster reads would answer
 that, makes them, and writes the answer back.
 
-It is three services inside the cluster plus a model server outside it. The split is the
-design, not an accident of packaging: **the agent that drives the model holds no
+It is three services inside the cluster plus a model server outside it, and — off the
+request path — an evaluation harness that measures how well the whole thing answers. The
+split is the design, not an accident of packaging: **the agent that drives the model holds no
 Kubernetes credentials at all.** It runs with `automountServiceAccountToken: false` and no
 RBAC, so every cluster read goes through `fathom-mcp`, which owns the only service account
 that can read anything. Widening what the model can see is a Helm values change in one
 chart — never a code change in the agent.
 
-Status: Phase 1, complete. All four deliverables build and deploy, currently at **v0.5.1**
-across all three charts.
+Status: Phase 1, complete — all four deliverables build and deploy — plus `eval/`, the
+evaluation harness added after it. Currently at **v0.5.4** across all four charts
+(`agent`, `mcp`, `front`, `eval`; `ollama/` is host-side and has none).
 
 ---
 
@@ -129,6 +131,26 @@ UI counts the seconds out loud so the wait does not read as a hang.
 | Conversation state | none | none — `/chat` is stateless | none — the transcript lives in the browser |
 | Reached at | `fathom-mcp.fathom.svc.cluster.local:8080/mcp` | NodePort `30080` | NodePort `30081` |
 
+`eval/` is a fourth component and sits apart from that table on purpose — it is not on
+the request path. In namespace `fathom-eval`: two batch CronJobs that stage broken
+workloads and grade the agent's answers about them, plus `fathom-eval-serve`, a
+read-only HTTP view of the results database that exists because SQLite is a library
+rather than a server and `fathom-front` cannot mount the volume from another namespace.
+
+|  | `fathom-eval` |
+|---|---|
+| Language | Python 3.12 |
+| Owns | the fixtures, the rubrics, the judge, and `results.db` |
+| Built on | `httpx`, `aiohttp` (the read service), SQLite |
+| K8s credentials | **yes, and the only *write* ones in the repo** — namespaces, bare Pods, Services, ConfigMaps; `secrets` create/delete without read |
+| Conversation state | none — every question is a fresh `/chat` |
+| Reached at | CronJobs, on a schedule and suspended by default; `fathom-eval-serve` on ClusterIP `:8080`, never a NodePort |
+
+Its write grant is why it is in its own namespace rather than in `fathom`. It does not
+go through `fathom-mcp` and cannot widen anything the agent can see — it is a client of
+`/chat` like the browser is, and `fathom-mcp`'s read-only ClusterRole is untouched by
+its existence.
+
 ### The six tools
 
 All read-only, in two groups with different backends.
@@ -182,7 +204,7 @@ loudly when it is missing.
 
 - **An OTLP collector** at `otel-collector.observability.svc.cluster.local:4317`, accepting
   gRPC in plaintext. If you do not have one, set `otel.mode=off` (or `console`) in all
-  three charts — the services degrade to no-op providers with a warning rather than
+  four charts — the services degrade to no-op providers with a warning rather than
   failing to start, but leaving the default pointed at nothing means every export attempt
   is a wasted retry.
 
@@ -267,18 +289,22 @@ Each component is a top-level directory with its own chart and its own release l
 ```
 agent/          Python agent — src/fathom_agent/, tests/, Dockerfile, helm/
 mcp/            Go MCP server — cmd/, internal/, Dockerfile, helm/
-front/   Go chat UI — cmd/, internal/ (assets embedded), Dockerfile, helm/
+front/          Go chat + eval UI — cmd/, internal/ (assets embedded), Dockerfile, helm/
+eval/           Python eval harness — src/fathom_eval/ (fixtures + rubrics packaged), helm/
 ollama/         host-side setup — config.env (every knob) + setup.sh (applies them)
-Makefile        cuts one version across all three components at once
+Makefile        cuts one version across all four components at once
 ```
 
-Two structural facts that catch people out:
+Three structural facts that catch people out:
 
-- **There is no top-level `helm/`.** The charts are `agent/helm`, `mcp/helm` and
-  `front/helm`.
-- **`mcp/helm` creates the `fathom` namespace and the other two do not**
+- **There is no top-level `helm/`.** The charts are `agent/helm`, `mcp/helm`,
+  `front/helm` and `eval/helm`.
+- **`mcp/helm` creates the `fathom` namespace and `agent`/`front` do not**
   (`namespace.create: false`). Two Helm releases both owning one Namespace object collide
   on install.
+- **`eval/helm` does create a namespace**, and does not collide, because `fathom-eval`
+  is a different object. It is a separate namespace because that release holds the only
+  write credentials in the repo.
 
 ---
 
@@ -347,14 +373,14 @@ the application. Setting them in the chart as well would split one source of tru
 
 ### Per-component build
 
-All three components take the same verbs, which is the point — same names, same
+All four components take the same verbs, which is the point — same names, same
 meanings, whichever language is behind them:
 
 ```sh
 make help                     # the target list, per component
-make build                    # the local artifact: a binary in Go, the venv in agent
+make build                    # the local artifact: a binary in Go, the venv in Python
 make fmt                      # format check, never a rewrite
-make lint                     # go vet in Go, ruff check in agent
+make lint                     # go vet in Go, ruff check in Python
 make test                     # unit tests
 make check                    # fmt, lint, test, chart lint (plus component extras)
 make image VERSION=0.5.1
@@ -418,7 +444,7 @@ path.
 
 ### Cutting a release
 
-The root `Makefile` exists for the one operation that spans all three components:
+The root `Makefile` exists for the one operation that spans all four components:
 
 ```sh
 make release BUMP=patch       # preflight, check, bump, push, deploy
@@ -459,10 +485,10 @@ apply` against the real cluster are a human's to run.
 
 ## Configuration
 
-Every knob in all three components is a Helm value, which the Deployment turns into a
+Every knob in all four components is a Helm value, which the workload turns into a
 `FATHOM_<COMPONENT>_*` environment variable — `FATHOM_AGENT_*`, `FATHOM_MCP_*`,
-`FATHOM_FRONT_*`. The component READMEs carry the full tables; this section is about the
-shape.
+`FATHOM_FRONT_*`, `FATHOM_EVAL_*`. The component READMEs carry the full tables; this
+section is about the shape.
 
 **Validation is fail-fast and names the variable.** A misconfigured pod dies on its first
 line of logs rather than failing mysteriously later:
@@ -474,7 +500,8 @@ a single tool call could outlive the turn that requested it
 
 **Telemetry is standard `OTEL_*`,** read by the SDKs directly. The one exception per
 component is `FATHOM_AGENT_TELEMETRY` / `FATHOM_MCP_TELEMETRY` / `FATHOM_FRONT_TELEMETRY`
-(`otlp` | `console` | `off`), which picks the exporter rather than tuning one.
+/ `FATHOM_EVAL_TELEMETRY` (`otlp` | `console` | `off`), which picks the exporter rather
+than tuning one.
 
 ### Where each thing is defined
 
@@ -485,7 +512,7 @@ These are the places where two files have to agree. Everything else has exactly 
 | Model and alias name | `ollama/config.env` | `agent/helm/values.yaml` → `ollama.model` |
 | Ollama endpoint | `ollama/config.env` | `agent/helm/values.yaml` → `ollama.url` |
 | What the agent may read | `mcp/helm/values.yaml` → `k8s.allowedResources` | nothing — it generates the RBAC itself |
-| Image version | the three `Chart.yaml` `appVersion`s | root `Makefile` moves them together |
+| Image version | the four `Chart.yaml` `appVersion`s | root `Makefile` moves them together |
 | Turn budget | `agent/helm` → `agent.requestTimeout` (180s) | `front/helm` → `agent.timeout` must exceed it |
 | Context window | `ollama/config.env` → `FATHOM_NUM_CTX` (16384) | `agent.maxToolChars`, and `k8s_log`'s caps |
 | Judge model and endpoint | `ollama/config.env` judge block | `eval/helm/values.yaml` → `judge.model`, `judge.url` |
@@ -508,9 +535,12 @@ the browser would show something true but useless instead.
 
 ## Telemetry
 
-All three services export OTLP traces and metrics over **gRPC** to the collector in the
-`observability` namespace, in plaintext. Logs are **not** exported — they stay on
-stdout/stderr as JSON and carry `trace_id` and `span_id` for correlation.
+The three services on the request path export OTLP traces **and** metrics over **gRPC**
+to the collector in the `observability` namespace, in plaintext. `fathom-eval` exports
+traces only — a batch job has no steady state for a metric export interval to describe,
+and the numbers it exists to produce are rows in `results.db`. Logs are **not** exported
+anywhere — they stay on stdout/stderr as JSON and carry `trace_id` and `span_id` for
+correlation.
 
 Probes are excluded rather than sampled: a full probe cycle emits zero spans anywhere,
 while one real `/chat` emits a single trace spanning all three services. Boundaries are
