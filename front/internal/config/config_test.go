@@ -68,6 +68,9 @@ func TestLoadRejects(t *testing.T) {
 		{"negative body cap", map[string]string{"FATHOM_FRONT_MAX_BODY_BYTES": "-1"}, "MAX_BODY_BYTES"},
 		{"unknown telemetry mode", map[string]string{"FATHOM_FRONT_TELEMETRY": "jaeger"}, "TELEMETRY"},
 		{"unknown log level", map[string]string{"FATHOM_FRONT_LOG_LEVEL": "chatty"}, "LOG_LEVEL"},
+		{"eval url without scheme", map[string]string{"FATHOM_FRONT_EVAL_URL": "fathom-eval-serve:8080"}, "EVAL_URL"},
+		{"eval url without host", map[string]string{"FATHOM_FRONT_EVAL_URL": "http://"}, "EVAL_URL"},
+		{"zero eval timeout", map[string]string{"FATHOM_FRONT_EVAL_TIMEOUT": "0s"}, "EVAL_TIMEOUT"},
 	}
 
 	for _, tt := range tests {
@@ -106,5 +109,36 @@ func TestLoadAccepts(t *testing.T) {
 		c.ReadyTimeout != 2*time.Second || c.MaxBodyBytes != 1024 ||
 		c.LogLevel != slog.LevelDebug || c.Telemetry != "off" {
 		t.Errorf("Load() = %+v, does not reflect the environment", c)
+	}
+}
+
+// TestEvalIsDisabledByDefault pins the shipped default of a feature gate, which is
+// the security-relevant half of it: an install that has not been told about eval must
+// not register the route at all.
+func TestEvalIsDisabledByDefault(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	if cfg.EvalURL != "" {
+		t.Errorf("EvalURL = %q, want empty", cfg.EvalURL)
+	}
+	if cfg.EvalEnabled() {
+		t.Error("EvalEnabled() = true with no URL set")
+	}
+}
+
+func TestEvalURLEnables(t *testing.T) {
+	t.Setenv("FATHOM_FRONT_EVAL_URL", "http://fathom-eval-serve.fathom-eval.svc.cluster.local:8080/")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	if !cfg.EvalEnabled() {
+		t.Fatal("EvalEnabled() = false with a URL set")
+	}
+	// Trailing slash trimmed, like AgentURL: the proxy joins paths onto it.
+	if strings.HasSuffix(cfg.EvalURL, "/") {
+		t.Errorf("EvalURL = %q, want the trailing slash trimmed", cfg.EvalURL)
 	}
 }

@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -61,19 +63,39 @@ func run() error {
 		}
 	}()
 
-	chat, err := proxy.New(proxy.Options{
+	var h handlers
+	trace := cfg.Telemetry != telemetry.ModeOff
+
+	if h.chat, err = proxy.New(proxy.Options{
 		Target:       cfg.ChatURL(),
 		Timeout:      cfg.AgentTimeout,
 		MaxBodyBytes: cfg.MaxBodyBytes,
-		Trace:        cfg.Telemetry != telemetry.ModeOff,
+		Trace:        trace,
 		Log:          log,
-	})
-	if err != nil {
+	}); err != nil {
 		return err
 	}
 
-	ui, err := web.Handler()
-	if err != nil {
+	// Built only when configured. A nil handler is the gate: newMux does not
+	// register the route at all, so /api/eval/* falls through to the file
+	// server and 404s exactly like any other path that is not there.
+	if cfg.EvalEnabled() {
+		if h.eval, err = proxy.New(proxy.Options{
+			Target:       cfg.EvalURL,
+			StripPrefix:  "/api/eval",
+			Methods:      []string{http.MethodGet},
+			PassQuery:    true,
+			Name:         "eval service",
+			Timeout:      cfg.EvalTimeout,
+			MaxBodyBytes: cfg.MaxBodyBytes,
+			Trace:        trace,
+			Log:          log,
+		}); err != nil {
+			return err
+		}
+	}
+
+	if h.ui, err = web.Handler(); err != nil {
 		return err
 	}
 
@@ -81,27 +103,72 @@ func run() error {
 		"version", version,
 		"addr", cfg.Addr,
 		"agent_url", cfg.AgentURL,
-		"agent_timeout", cfg.AgentTimeout)
+		"agent_timeout", cfg.AgentTimeout,
+		"eval_url", cfg.EvalURL,
+		"eval_enabled", cfg.EvalEnabled())
 
-	return serve(ctx, cfg, chat, ui, log)
+	return serve(ctx, cfg, h, log)
 }
 
-func serve(ctx context.Context, cfg *config.Config, chat, ui http.Handler, log *slog.Logger) error {
+// handlers are the three things the mux serves. eval is nil when
+// FATHOM_FRONT_EVAL_URL is unset, and that nil IS the feature gate -- see
+// newMux. A struct rather than a fourth positional argument to serve, which was
+// already at the edge of readable.
+type handlers struct {
+	chat http.Handler
+	eval http.Handler // nil when disabled
+	ui   http.Handler
+}
+
+// newMux builds the routing table. Split out from serve so it can be tested
+// without a listener -- the eval gate is exactly the kind of wiring that is
+// worth asserting, and serve() had no test at all before it existed.
+func newMux(cfg *config.Config, h handlers, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/api/chat", chat)
+	mux.Handle("/api/chat", h.chat)
+	if h.eval != nil {
+		// Subtree pattern; the trailing slash is what makes /api/eval/runs/7
+		// match. Absent entirely when eval is not configured.
+		mux.Handle("/api/eval/", h.eval)
+	}
+	mux.HandleFunc("/api/features", featuresHandler(cfg))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")
 	})
 	mux.HandleFunc("/readyz", readyHandler(cfg, log))
-	mux.Handle("/", ui)
+	mux.Handle("/", h.ui)
+	return mux
+}
+
+// featuresHandler tells the page which server-side gates are open.
+//
+// The browser is a separate artifact from the configuration -- it is embedded in
+// this binary and cannot read an environment variable -- so asking is the only
+// honest mechanism. One tiny fetch at boot, before the switcher renders, which
+// is what keeps an unconfigured install from flashing a view that is not there.
+//
+// Rejected: probing /api/eval/runs and hiding the view on a 404, which makes an
+// absent feature look like a broken one; and folding the flag into /readyz,
+// which is text/plain, forwards the agent's body verbatim, and would couple a
+// feature gate to agent health.
+func featuresHandler(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"eval": cfg.EvalEnabled()})
+	}
+}
+
+func serve(ctx context.Context, cfg *config.Config, h handlers, log *slog.Logger) error {
+	mux := newMux(cfg, h, log)
 
 	httpSrv := &http.Server{
 		Addr: cfg.Addr,
 		Handler: otelhttp.NewHandler(mux, "fathom-front",
 			otelhttp.WithFilter(telemetry.TraceHTTPRequest),
 			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
-				return r.Method + " " + r.URL.Path
+				return r.Method + " " + spanPath(r.URL.Path)
 			}),
 		),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -180,4 +247,22 @@ func fail(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	fmt.Fprintln(w, msg)
+}
+
+// spanPath collapses ids out of a path so the span name set stays bounded:
+// GET /api/eval/results/941 becomes GET /api/eval/results/{id}.
+//
+// Span names are not metric labels, so an unbounded set is not a cardinality
+// violation today. It is still worth bounding: one span name per result ever
+// viewed makes a trace backend useless for "how slow is the result view", and if
+// otelhttp ever gets WithRouteTag here the same string becomes a metric
+// attribute. Bound it where it is produced.
+func spanPath(path string) string {
+	segments := strings.Split(path, "/")
+	for i, seg := range segments {
+		if seg != "" && strings.IndexFunc(seg, func(r rune) bool { return r < '0' || r > '9' }) < 0 {
+			segments[i] = "{id}"
+		}
+	}
+	return strings.Join(segments, "/")
 }

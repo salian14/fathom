@@ -49,6 +49,24 @@ type Config struct {
 	// transcript is kilobytes; anything far past that is a mistake or an abuse.
 	MaxBodyBytes int64
 
+	// EvalURL is the base URL of fathom-eval's read service, e.g.
+	// "http://fathom-eval-serve.fathom-eval.svc.cluster.local:8080".
+	//
+	// Empty DISABLES the eval view entirely: no /api/eval route is registered
+	// and the page shows no switcher. Same gate shape as fathom-mcp's
+	// prometheus.url and for the same reason -- a feature that fails on every
+	// use is worse than one that is not there, because the reader spends time
+	// discovering it is broken rather than knowing it is absent. Empty is the
+	// shipped default: eval is optional, and most installs will not have it.
+	EvalURL string
+
+	// EvalTimeout bounds one proxied read. Deliberately not AgentTimeout: that
+	// is 200s because a model turn takes minutes, while this is a SELECT
+	// against a local SQLite file and answers in milliseconds. Sharing the knob
+	// would mean a wedged reader holding a browser connection for three
+	// minutes.
+	EvalTimeout time.Duration
+
 	// LogLevel for this service's own structured logs.
 	LogLevel slog.Level
 
@@ -62,6 +80,7 @@ func Load() (*Config, error) {
 	c := &Config{
 		Addr:      env("ADDR", ":8080"),
 		AgentURL:  strings.TrimRight(env("AGENT_URL", "http://fathom-agent.fathom.svc.cluster.local:8080"), "/"),
+		EvalURL:   strings.TrimRight(env("EVAL_URL", ""), "/"),
 		Telemetry: env("TELEMETRY", "otlp"),
 	}
 
@@ -70,6 +89,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.ReadyTimeout, err = envDuration("READY_TIMEOUT", 5*time.Second); err != nil {
+		return nil, err
+	}
+	if c.EvalTimeout, err = envDuration("EVAL_TIMEOUT", 10*time.Second); err != nil {
 		return nil, err
 	}
 	if c.MaxBodyBytes, err = envInt64("MAX_BODY_BYTES", 256*1024); err != nil {
@@ -113,6 +135,21 @@ func (c *Config) validate() error {
 		return fmt.Errorf("%sREADY_TIMEOUT (%s) exceeds %sAGENT_TIMEOUT (%s)",
 			envPrefix, c.ReadyTimeout, envPrefix, c.AgentTimeout)
 	}
+	// Only when set. Empty is the disabled state, not a misconfiguration.
+	if c.EvalURL != "" {
+		u, err := url.Parse(c.EvalURL)
+		switch {
+		case err != nil:
+			return fmt.Errorf("%sEVAL_URL: %w", envPrefix, err)
+		case u.Scheme != "http" && u.Scheme != "https":
+			return fmt.Errorf("%sEVAL_URL: want an http:// or https:// URL, got %q", envPrefix, c.EvalURL)
+		case u.Host == "":
+			return fmt.Errorf("%sEVAL_URL: %q has no host", envPrefix, c.EvalURL)
+		}
+	}
+	if c.EvalTimeout <= 0 {
+		return fmt.Errorf("%sEVAL_TIMEOUT must be > 0, got %s", envPrefix, c.EvalTimeout)
+	}
 	if c.MaxBodyBytes <= 0 {
 		return fmt.Errorf("%sMAX_BODY_BYTES must be > 0, got %d", envPrefix, c.MaxBodyBytes)
 	}
@@ -128,6 +165,11 @@ func (c *Config) validate() error {
 // ChatURL and ReadyURL are the two agent endpoints this service talks to.
 func (c *Config) ChatURL() string  { return c.AgentURL + "/chat" }
 func (c *Config) ReadyURL() string { return c.AgentURL + "/readyz" }
+
+// EvalEnabled reports whether the eval view is configured. There is no
+// EvalAPIURL() to go with it: the base URL *is* the proxy target, and mapping
+// /api/eval/x onto /x is the proxy's StripPrefix, not a string built here.
+func (c *Config) EvalEnabled() bool { return c.EvalURL != "" }
 
 func env(name, def string) string {
 	if v, ok := os.LookupEnv(envPrefix + name); ok {
