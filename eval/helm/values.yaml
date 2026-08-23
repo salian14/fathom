@@ -60,7 +60,7 @@ judge:
   enabled: true
   # The CPU-only second Ollama instance on the host. Not the agent's :11434 -- that one
   # serves the model under test on the GPU, and loading a 31B judge there would evict
-  # it (OLLAMA_MAX_LOADED_MODELS=1). See ollama/judge.env.
+  # it (OLLAMA_MAX_LOADED_MODELS=1). See the judge block of ollama/config.env.
   url: http://192.168.56.1:11435
   # The alias created by `ollama/setup.sh --judge`, never the raw base tag -- the same
   # rule the agent follows, so swapping the judge model is a config change plus a
@@ -139,8 +139,21 @@ cronjob:
   terminationGracePeriodSeconds: 300
 
 otel:
+  # otlp | console | off. "console" writes spans to stderr and needs no
+  # collector, which is what makes `make run-local` and `make run-serve` usable.
   mode: otlp
+  # The collector lives in another namespace, so this has to be an FQDN. The
+  # http:// scheme selects plaintext gRPC; there is no TLS in the lab.
   endpoint: http://otel-collector.observability.svc.cluster.local:4317
+  # Probes are excluded before sampling, so this only samples real work, and
+  # parentbased means a child never disagrees with its parent.
+  sampler: parentbased_always_on
+  # No metricExportInterval, unlike the other three charts, and no metrics at all:
+  # telemetry.py builds a TracerProvider and no MeterProvider. A batch job has no
+  # steady state for an export interval to describe, and the numbers this component
+  # exists to produce go to results.db, where the rubrics can grade them.
+
+  # Becomes deployment.environment.name on every span.
   environment: lab
 
 priorityClass:
