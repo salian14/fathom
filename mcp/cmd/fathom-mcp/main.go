@@ -25,6 +25,17 @@ import (
 var version = "dev"
 
 func main() {
+	// Handled before run(), and before any client is constructed: printing the
+	// contract needs no cluster, no Prometheus and no listener, and it must
+	// keep working on a workstation that has none of them.
+	if wantContract(os.Args[1:]) {
+		if err := contract(context.Background(), os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "fathom-mcp: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "fathom-mcp: %v\n", err)
 		os.Exit(1)

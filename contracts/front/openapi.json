@@ -1,0 +1,280 @@
+{
+  "components": {
+    "schemas": {
+      "Error": {
+        "description": "The same envelope fathom-agent uses, so the page has one shape to parse rather than one per failure origin.",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "Features": {
+        "description": "Which server-side gates are open.",
+        "properties": {
+          "eval": {
+            "description": "Whether the eval view has a backend to read.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "eval"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "The browser-facing surface of Fathom. Holds no Kubernetes credentials and no conversation state: the transcript lives in the page, because the agent's /chat is stateless by design.",
+    "title": "fathom-front",
+    "version": "0.5.4"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "A page or asset embedded in the binary."
+          },
+          "404": {
+            "description": "No such asset. An unconfigured /api/eval/* lands here too."
+          }
+        },
+        "summary": "The chat and eval UI, embedded in the binary."
+      }
+    },
+    "/api/chat": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "https://fathom.invalid/contracts/agent/openapi.json#/components/schemas/ChatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "https://fathom.invalid/contracts/agent/openapi.json#/components/schemas/ChatResponse"
+                }
+              }
+            },
+            "description": "The agent's answer, passed through unchanged."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Only POST reaches this route."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Body over the configured limit."
+          },
+          "499": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The browser aborted the request."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The agent was unreachable."
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The agent did not answer within FATHOM_FRONT_AGENT_TIMEOUT."
+          }
+        },
+        "summary": "Ask the agent a question. Request and response bodies pass through unchanged.",
+        "x-proxies-to": "fathom-agent POST /chat"
+      }
+    },
+    "/api/eval/{subpath}": {
+      "get": {
+        "description": "Registered only when FATHOM_FRONT_EVAL_URL is set. With no URL there is no client, no route and no advertised capability; a browser learns which gates are open from GET /api/features.",
+        "parameters": [
+          {
+            "description": "Forwarded to the upstream with the /api/eval prefix stripped.",
+            "in": "path",
+            "name": "subpath",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The eval read service's response, passed through unchanged. See contracts/eval/openapi.json."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Path outside /api/eval, or containing '..'."
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Only GET reaches this route."
+          },
+          "499": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The browser aborted the request."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The eval service was unreachable."
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The eval service did not answer within FATHOM_FRONT_EVAL_TIMEOUT."
+          }
+        },
+        "summary": "Read the eval results database. The /api/eval prefix is stripped before forwarding.",
+        "x-proxies-to": "fathom-eval-serve"
+      }
+    },
+    "/api/features": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Features"
+                }
+              }
+            },
+            "description": "Cache-Control: no-store."
+          }
+        },
+        "summary": "Which server-side gates are open. The page reads this before rendering the view switcher."
+      }
+    },
+    "/healthz": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "ok"
+          }
+        },
+        "summary": "Liveness: this process is up. Never traced."
+      }
+    },
+    "/readyz": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The agent reported ready."
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The agent's own reason, forwarded verbatim so the failing dependency is named."
+          }
+        },
+        "summary": "Readiness: forwards fathom-agent's /readyz body verbatim. Deliberately ignores eval.url.",
+        "x-proxies-to": "fathom-agent GET /readyz"
+      }
+    }
+  },
+  "x-proxy-status-mapping": {
+    "400": "path outside the route prefix, or containing ..",
+    "405": "method not accepted by this route; the Allow header lists what is",
+    "413": "request body over FATHOM_FRONT_MAX_BODY_BYTES",
+    "499": "the browser aborted (Stop, navigation, reload). Non-standard, and deliberate: nothing is wrong and nobody is listening",
+    "502": "upstream unreachable",
+    "504": "upstream did not answer within this route's timeout"
+  }
+}

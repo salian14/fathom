@@ -1,0 +1,57 @@
+{
+  "layout_version": 1,
+  "routes": [
+    {
+      "methods": [
+        "POST"
+      ],
+      "pattern": "/api/chat",
+      "subtree": false,
+      "summary": "Ask the agent a question. Request and response bodies pass through unchanged.",
+      "upstream": "fathom-agent POST /chat"
+    },
+    {
+      "gated_on": "FATHOM_FRONT_EVAL_URL",
+      "methods": [
+        "GET"
+      ],
+      "pattern": "/api/eval/",
+      "subtree": true,
+      "summary": "Read the eval results database. The /api/eval prefix is stripped before forwarding.",
+      "upstream": "fathom-eval-serve"
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "pattern": "/api/features",
+      "subtree": false,
+      "summary": "Which server-side gates are open. The page reads this before rendering the view switcher."
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "pattern": "/healthz",
+      "subtree": false,
+      "summary": "Liveness: this process is up. Never traced."
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "pattern": "/readyz",
+      "subtree": false,
+      "summary": "Readiness: forwards fathom-agent's /readyz body verbatim. Deliberately ignores eval.url.",
+      "upstream": "fathom-agent GET /readyz"
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "pattern": "/",
+      "subtree": true,
+      "summary": "The chat and eval UI, embedded in the binary."
+    }
+  ]
+}

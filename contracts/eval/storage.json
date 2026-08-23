@@ -1,0 +1,6 @@
+{
+  "engine": "sqlite",
+  "layout_version": 1,
+  "note": "There is no migration tool. The version is stored in the meta table and served at /meta; reporting.connect_ro opens mode=ro with PRAGMA query_only and refuses to create the file, rather than conjuring an empty database that would shadow the real one.",
+  "schema_version": 2
+}

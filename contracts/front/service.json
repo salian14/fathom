@@ -1,0 +1,47 @@
+{
+  "component": "front",
+  "defaults": {
+    "addr": ":8080",
+    "agent_timeout": "3m20s",
+    "agent_url": "http://fathom-agent.fathom.svc.cluster.local:8080",
+    "eval_timeout": "10s",
+    "max_body_bytes": 262144,
+    "ready_timeout": "5s"
+  },
+  "depends_on": [],
+  "layout_version": 1,
+  "listen_port": 8080,
+  "namespaces": [
+    "fathom"
+  ],
+  "probes": {
+    "liveness": "/healthz",
+    "readiness": "/readyz"
+  },
+  "rbac": [],
+  "service": "fathom-front",
+  "services": [
+    {
+      "name": "fathom-front",
+      "namespace": "fathom",
+      "node_port": 30081,
+      "port": 8080,
+      "protocol": "TCP",
+      "target_port": "http",
+      "type": "NodePort"
+    }
+  ],
+  "version": "0.5.4",
+  "workloads": [
+    {
+      "container_ports": [
+        8080
+      ],
+      "images": [
+        "registry.lab:5000/fathom-front:0.5.4"
+      ],
+      "kind": "Deployment",
+      "name": "fathom-front"
+    }
+  ]
+}

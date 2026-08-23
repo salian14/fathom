@@ -114,6 +114,143 @@ def _with_db(cfg: Config, handler: Callable[[web.Request, sqlite3.Connection], A
     return wrapped
 
 
+# --- the published contract -----------------------------------------------------
+#
+# aiohttp's router knows every path and method registered on it, so the generated
+# spec takes those from the app itself and never restates them. What the router
+# cannot know is the shape of what comes back: these handlers build dicts straight
+# out of SQL rows, so there is no model to introspect the way FastAPI has one in
+# fathom-agent.
+#
+# The response shapes therefore live here, next to the handlers that produce them,
+# and `test_every_route_is_described` fails if a route is added without one. That
+# test is the whole reason this is safe to publish -- a hand-written schema with no
+# guard is exactly the second source of truth this repo keeps avoiding.
+RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
+    "/healthz": {
+        "summary": "Liveness: this process is up. Never traced.",
+        "media_type": "text/plain",
+        "responses": {"200": {"description": "ok"}},
+    },
+    "/readyz": {
+        "summary": "Readiness: /data is mounted and readable.",
+        "media_type": "text/plain",
+        "responses": {
+            "200": {
+                "description": "ok, and whether a database is present yet. An absent "
+                "database is a correct state, not a failure -- it renders as an empty view."
+            },
+            "503": {"description": "The data directory is not mounted, or not readable."},
+        },
+    },
+    "/meta": {
+        "summary": "What database this service is reading and what it will serve.",
+        "responses": {
+            "200": {
+                "description": "Present even when there is no database yet.",
+                "schema": {
+                    "type": "object",
+                    "required": ["database", "max_rows"],
+                    "properties": {
+                        "database": {
+                            "type": "object",
+                            "description": "Path, presence and size of results.db.",
+                        },
+                        "max_rows": {
+                            "type": "integer",
+                            "description": "The cap this service applies to any limit.",
+                        },
+                        "schema_version": {
+                            "type": "integer",
+                            "description": "Absent when there is no database. A version "
+                            "newer than the reader's is a 503, not a best-effort read.",
+                        },
+                    },
+                },
+            }
+        },
+    },
+    "/runs": {
+        "summary": "The eval runs, newest first.",
+        "query": {
+            "limit": {"type": "integer", "default": 50, "description": "Capped at max_rows."},
+            "offset": {"type": "integer", "default": 0},
+        },
+        "responses": {
+            "200": {
+                "description": "An absent database is 200 with empty:true, not an error.",
+                "schema": {
+                    "type": "object",
+                    "required": ["runs", "limit", "offset", "total"],
+                    "properties": {
+                        "runs": {"type": "array", "items": {"type": "object"}},
+                        "limit": {"type": "integer"},
+                        "offset": {"type": "integer"},
+                        "total": {"type": "integer"},
+                        "empty": {"type": "boolean"},
+                        "reason": {"type": "string"},
+                    },
+                },
+            },
+            "503": {"description": "Database unreadable, or written by a newer harness."},
+        },
+    },
+    "/runs/{id}": {
+        "summary": "One run: its totals, its fixtures, its checks and its results.",
+        "query": {
+            "rubric": {"type": "string", "description": "Defaults to the newest version present."},
+            "fixture": {"type": "string"},
+            "outcome": {"type": "string"},
+            "order": {
+                "type": "string",
+                "enum": ["natural", "interesting"],
+                "default": "natural",
+            },
+            "limit": {"type": "integer", "description": "Defaults to and is capped at max_rows."},
+            "offset": {"type": "integer", "default": 0},
+        },
+        "responses": {
+            "200": {
+                "description": "The run and everything needed to render it in one request.",
+                "schema": {
+                    "type": "object",
+                    "required": ["run", "fixtures", "checks", "results"],
+                    "properties": {
+                        "run": {"type": "object"},
+                        "fixtures": {"type": "array", "items": {"type": "object"}},
+                        "checks": {"type": "array", "items": {"type": "object"}},
+                        "category_order": {"type": "array", "items": {"type": "string"}},
+                        "rubric_versions": {"type": "array", "items": {"type": "string"}},
+                        "rubric": {"type": ["string", "null"]},
+                        "results": {"type": "array", "items": {"type": "object"}},
+                        "limit": {"type": "integer"},
+                        "offset": {"type": "integer"},
+                        "total": {"type": "integer"},
+                    },
+                },
+            },
+            "404": {"description": "No such run."},
+        },
+    },
+    "/results/{id}": {
+        "summary": "One graded answer, in full.",
+        # Said out loud because it is why this service is ClusterIP and must stay
+        # that way: the stored answer is returned verbatim, planted canary included.
+        "description": "The only endpoint that returns free text -- the agent's answer, "
+        "the question and the judge's rationale. `results.answer` is verbatim, which "
+        "includes the canary the secret-bait fixture plants. This is why the service is "
+        "ClusterIP and unauthenticated rather than exposed.",
+        "responses": {
+            "200": {
+                "description": "The results row, with steps, remediation and checks decoded.",
+                "schema": {"type": "object"},
+            },
+            "404": {"description": "No such result."},
+        },
+    },
+}
+
+
 def build_app(cfg: Config) -> web.Application:
     app = web.Application()
 

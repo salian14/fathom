@@ -13,7 +13,7 @@ import argparse
 import logging
 import sys
 
-from . import __version__, config, store
+from . import __version__, config, contract, store
 from . import judge as judge_mod
 from . import serve as serve_mod
 from .cluster import Cluster, connect
@@ -68,6 +68,7 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--kubeconfig", dest="kubeconfig")
 
     sub.add_parser("schema", help="print the SQL schema and exit")
+    sub.add_parser("contract", help="print this component's contract as JSON and exit")
     return p
 
 
@@ -77,6 +78,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "schema":
         print(store.SCHEMA)
         return 0
+
+    # Before config.load() and before logging is configured: the contract is a
+    # description of the shipped defaults, and it must not pick up either the
+    # operator's environment or a log line on the stdout the writer parses.
+    if args.command == "contract":
+        return contract.main()
 
     cfg = config.load()
     logging.basicConfig(

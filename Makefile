@@ -99,14 +99,17 @@ help:
 	@echo "  make release VERSION=1.4.2            pin an exact version instead of bumping"
 	@echo
 	@echo "  make version                          show the current and next version"
-	@echo "  make check                            run every component check"
+	@echo "  make check                            run every component check, then contracts-check"
+	@echo "  make contracts                        regenerate contracts/ from the components themselves"
+	@echo "  make contracts-check                  fail if contracts/ has drifted from the code"
+	@echo "  make hooks                            install the checked-in git hooks (.githooks)"
 	@echo "  make bump BUMP=patch                  rewrite the version files, then commit and tag them"
 	@echo "  make push  BUMP=patch                 build and push every image only"
 	@echo "  make deploy                           helm upgrade every chart -- each waits on the last"
 	@echo "  make render                           render every chart at the next version"
 	@echo "  make clean                            clean every component"
 	@echo
-	@echo "Knobs:  ALLOW_DIRTY=1  SKIP_CHECK=1  NO_COMMIT=1  NO_TAG=1"
+	@echo "Knobs:  ALLOW_DIRTY=1  SKIP_CHECK=1  NO_COMMIT=1  NO_TAG=1  COMPONENT=<name>"
 	@echo "        HELM_NAMESPACE=<ns>  HELM_FLAGS='...'  FATHOM_NS=<ns>  EVAL_NS=<ns>"
 	@echo "        ROLLOUT_TIMEOUT=5m"
 	@echo
@@ -140,12 +143,81 @@ preflight:
 	@echo "==> releasing $(CURRENT) -> $(NEXT) ($(COMPONENTS))"
 
 .PHONY: check
-check:
+check: contracts-check
 	@if [ -n "$(SKIP_CHECK)" ]; then echo "==> skipping component checks (SKIP_CHECK set)"; else \
 	  for c in $(COMPONENTS); do \
 	    echo "==> check: $$c"; $(MAKE) --no-print-directory -C $$c check || exit 1; \
 	  done; \
 	fi
+
+# --- contracts ---------------------------------------------------------------
+#
+# contracts/ is generated, never edited. Each component prints its own interface
+# (`make -C <c> contract`), the writer merges in the facts only the chart knows --
+# namespace, Service type, nodePort, RBAC -- and cross-checks the two where they
+# overlap, so a listen port that no longer matches service.port fails here rather
+# than as a pod that starts, passes its own probes and is unreachable.
+#
+# The pre-commit hook in .githooks/ runs the same writer on the components a
+# commit touches. `contracts-check` is the same thing for anyone who never
+# installs the hook -- which is everyone until they run `make hooks`, and there
+# is no CI here to catch it for them.
+#
+# The writer needs PyYAML, which the system interpreter does not have and `yq`
+# would have solved if it were installed. Both Python components' venvs carry it
+# already, so the first one that exists is used and one is built only if neither
+# does.
+CONTRACT_PY := $(firstword $(wildcard eval/.venv/bin/python agent/.venv/bin/python))
+
+.PHONY: contract-venv
+contract-venv:
+	@if [ -z "$(CONTRACT_PY)" ]; then \
+	  echo "==> no component venv yet; building eval's for PyYAML"; \
+	  $(MAKE) --no-print-directory -C eval venv; \
+	fi
+
+.PHONY: contracts
+contracts: contract-venv
+	@py="$(CONTRACT_PY)"; [ -n "$$py" ] || py=eval/.venv/bin/python; \
+	$$py scripts/contracts.py $(COMPONENT)
+
+# Regenerates into a temp tree and diffs, so a drifted contract is reported
+# without being silently repaired -- `make contracts` is how you repair it.
+# integration-notes.md is excluded: it is hand-written and the writer only ever
+# creates it, so a missing one in the temp tree is not drift.
+.PHONY: contracts-check
+contracts-check: contract-venv
+	@py="$(CONTRACT_PY)"; [ -n "$$py" ] || py=eval/.venv/bin/python; \
+	tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
+	$$py scripts/contracts.py --out "$$tmp" $(COMPONENT) || exit 1; \
+	scope="$(COMPONENT)"; rc=0; : >"$$tmp.diff"; \
+	if [ -n "$$scope" ]; then \
+	  for c in $$scope; do \
+	    diff -r -x integration-notes.md "contracts/$$c" "$$tmp/$$c" >>"$$tmp.diff" 2>&1 || rc=1; \
+	  done; \
+	else \
+	  diff -r -x integration-notes.md contracts "$$tmp" >>"$$tmp.diff" 2>&1 || rc=1; \
+	fi; \
+	if [ $$rc -eq 0 ]; then \
+	  echo "==> contracts up to date"; \
+	else \
+	  echo "==> contracts have drifted from the code:"; cat "$$tmp.diff"; \
+	  echo; echo "Run 'make contracts' and commit the result."; \
+	  rm -f "$$tmp.diff"; exit 1; \
+	fi; \
+	rm -f "$$tmp.diff"
+
+# Opt in to the checked-in hooks. Separate from anything that runs on its own:
+# pointing core.hooksPath at a directory in the repo means a `git pull` can change
+# what runs on your machine at commit time, and that is a decision to take
+# knowingly rather than a side effect of running a build.
+.PHONY: hooks
+hooks:
+	@git config core.hooksPath .githooks
+	@echo "core.hooksPath = .githooks"
+	@echo "pre-commit will regenerate contracts/ for the components a commit touches."
+	@echo "Bypass once with 'git commit --no-verify', or always with FATHOM_SKIP_CONTRACTS=1."
+	@echo "Undo with 'git config --unset core.hooksPath'."
 
 # Chart version and appVersion move together: appVersion is what the Deployment
 # reads for its image tag, and a chart whose own version did not change will not

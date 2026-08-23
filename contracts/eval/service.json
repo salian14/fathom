@@ -1,0 +1,176 @@
+{
+  "component": "eval",
+  "defaults": {
+    "db_path": "/data/results.db",
+    "request_timeout": 240.0,
+    "serve_addr": ":8080",
+    "serve_max_rows": 500
+  },
+  "depends_on": [
+    {
+      "contract": "contracts/agent/",
+      "name": "fathom-agent",
+      "note": "Dialled as an ordinary client, one fresh POST /chat per question.",
+      "protocol": "http",
+      "required": true
+    },
+    {
+      "contract": null,
+      "name": "ollama-judge",
+      "note": "CPU-only second Ollama on the host, :11435. Only the judge CronJob needs it; the read service does not.",
+      "protocol": "http",
+      "required": false
+    }
+  ],
+  "layout_version": 1,
+  "listen_port": 8080,
+  "namespaces": [
+    "fathom-eval"
+  ],
+  "probes": {
+    "liveness": "/healthz",
+    "readiness": "/readyz"
+  },
+  "rbac": [
+    {
+      "kind": "ClusterRole",
+      "name": "fathom-eval",
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "namespaces"
+          ],
+          "verbs": [
+            "create",
+            "list"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resourceNames": [
+            "fathom-eval-healthy",
+            "fathom-eval-crashloop",
+            "fathom-eval-imagepull",
+            "fathom-eval-pending",
+            "fathom-eval-missing-configmap",
+            "fathom-eval-service-no-endpoints",
+            "fathom-eval-secret-bait",
+            "fathom-eval-prom-restarts",
+            "fathom-eval-oomkill",
+            "fathom-eval-cpu-throttle"
+          ],
+          "resources": [
+            "namespaces"
+          ],
+          "verbs": [
+            "get",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods",
+            "services",
+            "configmaps"
+          ],
+          "verbs": [
+            "create",
+            "delete",
+            "get",
+            "list"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "secrets"
+          ],
+          "verbs": [
+            "create",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "events",
+            "pods/status"
+          ],
+          "verbs": [
+            "get",
+            "list"
+          ]
+        },
+        {
+          "apiGroups": [
+            "scheduling.k8s.io"
+          ],
+          "resources": [
+            "priorityclasses"
+          ],
+          "verbs": [
+            "get",
+            "list"
+          ]
+        }
+      ]
+    }
+  ],
+  "service": "fathom-eval-serve",
+  "services": [
+    {
+      "name": "fathom-eval-serve",
+      "namespace": "fathom-eval",
+      "node_port": null,
+      "port": 8080,
+      "protocol": "TCP",
+      "target_port": "http",
+      "type": "ClusterIP"
+    }
+  ],
+  "version": "0.5.4",
+  "workloads": [
+    {
+      "container_ports": [],
+      "images": [
+        "registry.lab:5000/fathom-eval:0.5.4"
+      ],
+      "kind": "CronJob",
+      "name": "fathom-eval",
+      "schedule": "0 1 * * *",
+      "suspend": true
+    },
+    {
+      "container_ports": [],
+      "images": [
+        "registry.lab:5000/fathom-eval:0.5.4"
+      ],
+      "kind": "CronJob",
+      "name": "fathom-eval-judge",
+      "schedule": "0 7 * * *",
+      "suspend": true
+    },
+    {
+      "container_ports": [
+        8080
+      ],
+      "images": [
+        "registry.lab:5000/fathom-eval:0.5.4"
+      ],
+      "kind": "Deployment",
+      "name": "fathom-eval-serve"
+    }
+  ]
+}

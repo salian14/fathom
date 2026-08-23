@@ -17,16 +17,23 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
+from typing import Annotated, Any
 
 import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.utils import suppress_instrumentation
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, WithJsonSchema
 
 from . import __version__, telemetry
-from .agent import build_graph, build_messages, shape_remediation, summarise
+from .agent import (
+    REMEDIATION_SCHEMA,
+    build_graph,
+    build_messages,
+    shape_remediation,
+    summarise,
+)
 from .config import Config, load
 from .llm import build_model, build_shaper
 from .mcp_client import build_client, tool_session, untraced_tool_session
@@ -37,6 +44,49 @@ log = logging.getLogger("fathom_agent")
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1)
     history: list[dict[str, str]] | None = None
+
+
+class Step(BaseModel):
+    """One tool call the agent made, and what came back.
+
+    Returned to the caller because "which tools did it actually call" is the first
+    question worth asking when an answer looks wrong, and reading it from the
+    response beats reconstructing it from pod logs.
+    """
+
+    tool: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    # Absent on a call that never produced a ToolMessage -- a turn cut short by the
+    # iteration ceiling ends that way, and the step is still worth reporting.
+    result_chars: int | None = None
+    status: str | None = None
+
+
+# The remediation shape has exactly one definition: REMEDIATION_SCHEMA, which is
+# already a hand-written JSON Schema because Ollama is handed it as `format=`.
+# WithJsonSchema points the published spec at that same object rather than at a
+# Pydantic restatement of it -- two declarations of one shape drift, and the one
+# the model is constrained by is the one that is true.
+Remediation = Annotated[dict[str, Any], WithJsonSchema(REMEDIATION_SCHEMA)]
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    remediation: Remediation | None = None
+    # Which of the two empty-remediation cases this is: absent shaping because the
+    # cluster is healthy, or shaping that failed. Never both with `remediation`.
+    remediation_error: str | None = None
+    steps: list[Step] = Field(default_factory=list)
+    iterations: int
+    model: str
+    elapsed_seconds: float
+
+
+class Error(BaseModel):
+    """The failure envelope, shared with fathom-front so the page has one shape
+    to parse rather than one per failure origin."""
+
+    error: str
 
 
 # Built once at import. The global meter is a no-op until telemetry.configure
@@ -111,7 +161,25 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             return PlainTextResponse(problem + "\n", status_code=503)
         return "ok\n"
 
-    @app.post("/chat")
+    # response_model is what puts a real body schema in the published spec.
+    # The failure paths below return JSONResponse directly and so bypass it,
+    # which is why they are declared here: a caller has to handle all four, and
+    # 504 in particular is the whole turn budget expiring rather than a crash.
+    @app.post(
+        "/chat",
+        response_model=ChatResponse,
+        responses={
+            400: {"model": Error, "description": "Malformed history: an unknown role."},
+            502: {
+                "model": Error,
+                "description": "The turn failed. The type and message are forwarded.",
+            },
+            504: {
+                "model": Error,
+                "description": "The turn outlived FATHOM_AGENT_REQUEST_TIMEOUT.",
+            },
+        },
+    )
     async def chat(request: ChatRequest):
         cfg: Config = app.state.cfg
         try:

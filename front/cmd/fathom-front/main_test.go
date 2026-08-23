@@ -204,3 +204,54 @@ func TestSpanPathCollapsesIds(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryRouteIsRegistered is the guard that makes routes() safe to publish.
+//
+// routes() is both the routing table and the source of the generated contract,
+// so the failure it has to rule out is an entry that describes a route nobody
+// serves -- a contract that lies is worse than no contract, because it is
+// believed. Every entry is dialled through the real mux with the eval gate
+// open, and anything that does not reach its handler is a lie in the spec.
+func TestEveryRouteIsRegistered(t *testing.T) {
+	var chat, eval int
+	cfg := testConfig("http://127.0.0.1:1")
+	cfg.EvalURL = "http://eval.invalid:8080"
+	mux := newMux(cfg, handlers{
+		chat: stubHandler(&chat),
+		eval: stubHandler(&eval),
+		ui:   stubHandler(new(int)),
+	}, quietLog())
+
+	for _, r := range routes() {
+		// A subtree pattern is not itself a request path; dial something under
+		// it, which is the form a browser actually sends.
+		path := r.Pattern
+		if strings.HasSuffix(path, "/") && path != "/" {
+			path += "probe"
+		}
+		for _, method := range r.Methods {
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
+			if rec.Code == http.StatusNotFound {
+				t.Errorf("%s %s: 404, so routes() describes a route the mux does not serve", method, path)
+			}
+		}
+		if len(r.Methods) == 0 {
+			t.Errorf("routes() entry %q declares no methods, so the contract cannot describe it", r.Pattern)
+		}
+	}
+}
+
+// TestGatedRouteIsMarkedInTheTable keeps the contract's gate honest: the entry
+// that disappears without a URL is the one that must carry GatedOn, or the
+// generated spec advertises a route that is absent on most installs.
+func TestGatedRouteIsMarkedInTheTable(t *testing.T) {
+	for _, r := range routes() {
+		gatedInTable := r.GatedOn != ""
+		conditional := r.enabled != nil
+		if gatedInTable != conditional {
+			t.Errorf("route %q: GatedOn=%q but enabled==nil is %v -- the table and the gate disagree",
+				r.Pattern, r.GatedOn, r.enabled == nil)
+		}
+	}
+}

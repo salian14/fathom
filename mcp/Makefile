@@ -5,7 +5,7 @@
 # without knowing which language is behind it:
 #
 #   help build fmt lint test check image push lint-chart render-chart
-#   run-local version clean all
+#   contract run-local version clean all
 #
 # Anything beyond that list is component-specific and named so: `run-stdio`
 # here, `venv`/`lock`/`lock-check` in agent, `test-ui` in front. `vet` is
@@ -40,6 +40,7 @@ help:
 	@echo "  make push           image, then docker push"
 	@echo "  make lint-chart     helm lint + template (skips without helm)"
 	@echo "  make render-chart   helm template to stdout"
+	@echo "  make contract       print this component's contract as JSON"
 	@echo "  make run-local      run the HTTP transport on :$(LOCAL_PORT)"
 	@echo "  make run-stdio      run the stdio transport (component-specific)"
 	@echo "  make version        show the version this build would carry"
@@ -98,6 +99,14 @@ lint-chart:
 .PHONY: render-chart
 render-chart:
 	helm template $(BINARY) $(CHART)
+
+# Print this component's published interface as one JSON document on stdout,
+# and nothing else -- the writer in scripts/contracts.py parses this, so a
+# stray echo here becomes a parse error there. Needs no cluster: see contract.go.
+.PHONY: contract
+contract:
+	@$(MAKE) --no-print-directory build 1>&2
+	@./bin/$(BINARY) -contract
 
 # The HTTP transport, the same one the agent pod dials, against the cluster via
 # the out-of-cluster kubeconfig fallback. Console telemetry so it needs no

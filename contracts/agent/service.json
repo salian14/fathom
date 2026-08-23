@@ -1,0 +1,61 @@
+{
+  "component": "agent",
+  "defaults": {
+    "addr": ":8080",
+    "max_iterations": 8,
+    "model": "fathom-agent",
+    "remediation_timeout": 45.0,
+    "request_timeout": 180.0
+  },
+  "depends_on": [
+    {
+      "contract": "contracts/mcp/",
+      "name": "fathom-mcp",
+      "note": "Every cluster read goes through it. The agent holds no Kubernetes credentials and no RBAC of its own.",
+      "protocol": "mcp streamable-http",
+      "required": true
+    },
+    {
+      "contract": null,
+      "name": "ollama",
+      "note": "On the host, outside the cluster. Reached at the host's address on the libvirt network, never localhost and never a Service.",
+      "protocol": "http",
+      "required": true
+    }
+  ],
+  "layout_version": 1,
+  "listen_port": 8080,
+  "namespaces": [
+    "fathom"
+  ],
+  "probes": {
+    "liveness": "/healthz",
+    "readiness": "/readyz"
+  },
+  "rbac": [],
+  "service": "fathom-agent",
+  "services": [
+    {
+      "name": "fathom-agent",
+      "namespace": "fathom",
+      "node_port": 30080,
+      "port": 8080,
+      "protocol": "TCP",
+      "target_port": "http",
+      "type": "NodePort"
+    }
+  ],
+  "version": "0.5.4",
+  "workloads": [
+    {
+      "container_ports": [
+        8080
+      ],
+      "images": [
+        "registry.lab:5000/fathom-agent:0.5.4"
+      ],
+      "kind": "Deployment",
+      "name": "fathom-agent"
+    }
+  ]
+}

@@ -1,0 +1,144 @@
+{
+  "component": "mcp",
+  "defaults": {
+    "addr": ":8080",
+    "allowed_namespaces": null,
+    "allowed_resources": [
+      "pods",
+      "services",
+      "nodes",
+      "namespaces",
+      "events",
+      "configmaps",
+      "persistentvolumeclaims",
+      "serviceaccounts",
+      "endpoints",
+      "replicationcontrollers",
+      "deployments.apps",
+      "replicasets.apps",
+      "statefulsets.apps",
+      "daemonsets.apps",
+      "jobs.batch",
+      "cronjobs.batch",
+      "ingresses.networking.k8s.io",
+      "networkpolicies.networking.k8s.io"
+    ],
+    "request_timeout": "30s"
+  },
+  "depends_on": [],
+  "layout_version": 1,
+  "listen_port": 8080,
+  "namespaces": [
+    "fathom"
+  ],
+  "probes": {
+    "liveness": "/healthz",
+    "readiness": "/readyz"
+  },
+  "rbac": [
+    {
+      "kind": "ClusterRole",
+      "name": "fathom-mcp",
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "configmaps",
+            "endpoints",
+            "events",
+            "namespaces",
+            "nodes",
+            "persistentvolumeclaims",
+            "pods",
+            "replicationcontrollers",
+            "serviceaccounts",
+            "services"
+          ],
+          "verbs": [
+            "get",
+            "list"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "daemonsets",
+            "deployments",
+            "replicasets",
+            "statefulsets"
+          ],
+          "verbs": [
+            "get",
+            "list"
+          ]
+        },
+        {
+          "apiGroups": [
+            "batch"
+          ],
+          "resources": [
+            "cronjobs",
+            "jobs"
+          ],
+          "verbs": [
+            "get",
+            "list"
+          ]
+        },
+        {
+          "apiGroups": [
+            "networking.k8s.io"
+          ],
+          "resources": [
+            "ingresses",
+            "networkpolicies"
+          ],
+          "verbs": [
+            "get",
+            "list"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods/log"
+          ],
+          "verbs": [
+            "get"
+          ]
+        }
+      ]
+    }
+  ],
+  "service": "fathom-mcp",
+  "services": [
+    {
+      "name": "fathom-mcp",
+      "namespace": "fathom",
+      "node_port": null,
+      "port": 8080,
+      "protocol": "TCP",
+      "target_port": "http",
+      "type": "ClusterIP"
+    }
+  ],
+  "version": "0.5.4",
+  "workloads": [
+    {
+      "container_ports": [
+        8080
+      ],
+      "images": [
+        "registry.lab:5000/fathom-mcp:0.5.4"
+      ],
+      "kind": "Deployment",
+      "name": "fathom-mcp"
+    }
+  ]
+}
