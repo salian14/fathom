@@ -10,7 +10,10 @@ instrumentation.
 
 `eval/` (Python) is the evaluation harness, added after Phase 1: it stages known-broken
 workloads in disposable namespaces, asks the agent about them, and grades the answers
-deterministically into SQLite. It runs as a suspended-by-default CronJob, not as a service.
+deterministically into SQLite. The grading runs as two suspended-by-default CronJobs. It
+also carries one long-running workload — `serve`, a read-only HTTP view of the results
+database — because SQLite is a library rather than a server, and `fathom-front`'s eval
+view is in another namespace and cannot mount the volume.
 
 ## What this is
 
@@ -22,13 +25,19 @@ tools.
   Holds no Kubernetes credentials at all.
 - **`mcp/`** — Go, an MCP server over streamable HTTP. Owns every read-only tool and the only
   service account that can read the cluster.
-- **`front/`** — Go, a chat UI served from the binary with `/api/chat` reverse-proxied to
-  the agent. Holds no Kubernetes credentials and no conversation state.
-- **`eval/`** — Python, a batch harness in namespace `fathom-eval`. **The only component
-  in this repo whose ServiceAccount can write to the cluster.** That is deliberate and
-  isolated: it needs to create and destroy fixture namespaces, and it is kept out of the
-  `fathom` namespace for that reason. It does not go through `fathom-mcp` and cannot
-  widen what the agent can see.
+- **`front/`** — Go, a two-view UI served from the binary: a chat view with `/api/chat`
+  reverse-proxied to the agent, and an eval view with `/api/eval/*` reverse-proxied to
+  `fathom-eval`'s read service. Holds no Kubernetes credentials and no state. The eval
+  view is gated on `eval.url` being set, exactly as the Prometheus tools are gated on
+  `prometheus.url` — with no URL there is no route and no tab.
+- **`eval/`** — Python, in namespace `fathom-eval`: two batch CronJobs plus a read-only
+  service over their results. **The harness's ServiceAccount is the only one in this repo
+  that can write to the cluster.** That is deliberate and isolated: it needs to create and
+  destroy fixture namespaces, and it is kept out of the `fathom` namespace for that
+  reason. It does not go through `fathom-mcp` and cannot widen what the agent can see.
+  The read service has a ServiceAccount of its own, with no token and no RBAC at all — it
+  needs the volume, not the cluster, and reusing the harness's would put namespace-delete
+  on the one pod here that another namespace can reach.
 
 The split matters: the agent pod runs with `automountServiceAccountToken: false` and no RBAC, so
 every cluster read goes through `fathom-mcp`. Widening what the agent can see is an RBAC change in
@@ -44,6 +53,7 @@ Five moving pieces:
 | `fathom-agent` (Python) | **Inside** the cluster, namespace `fathom` |
 | `fathom-mcp` (Go) | **Inside** the cluster, namespace `fathom` |
 | `fathom-front` (Go) | **Inside** the cluster, namespace `fathom` |
+| `fathom-eval-serve` (Python) | **Inside** the cluster, namespace `fathom-eval` |
 | otel-collector | **Inside** the cluster, namespace `observability` |
 
 The consequence that shapes most of the code: **the agent and the model are on opposite sides of a
@@ -113,7 +123,8 @@ image push lint-chart render-chart run-local version clean all` mean the same th
 each, so `make -C <component> <target>` works without knowing the language behind it, and
 `make` with no target prints `help`. Anything outside that list is component-specific and
 named so — `run-stdio` in `mcp`, `venv`/`lock`/`lock-check` in `agent` and `eval`, `test-ui` in
-`front`, `run-judge`/`run-now`/`db-pull` in `eval`; the Go components keep `vet` as an alias for `lint`.
+`front`, `run-judge`/`run-now`/`run-serve`/`db-pull` in `eval`; the Go components keep `vet` as an
+alias for `lint`.
 A new target that belongs to all four goes into all four, or it is not part of the shared set.
 
 ## Telemetry

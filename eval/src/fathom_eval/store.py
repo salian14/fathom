@@ -64,8 +64,10 @@ CREATE TABLE IF NOT EXISTS results (
     question_text   TEXT,
     iteration       INTEGER NOT NULL,
     http_status     INTEGER,
-    -- ok | ceiling | no_answer | timeout | error. Anything but 'ok' is a
-    -- non-functional failure and is reported as a bug, not as a low score.
+    -- ok | ceiling | no_answer | timeout | error | fixture_error. Anything but
+    -- 'ok' is a non-functional failure and is reported as a bug, not as a low
+    -- score. 'fixture_error' is the runner's own: the fixture never reached its
+    -- broken state, so nothing was measured at all.
     outcome         TEXT NOT NULL,
     answer          TEXT,
     -- The structured remediation from /chat, verbatim. Stored rather than derived
