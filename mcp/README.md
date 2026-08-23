@@ -179,6 +179,7 @@ environment variables. The ones that matter at deploy time:
 | `namespace.name` / `namespace.create` | `fathom` / `true` | Where the workload lives, and whether the chart creates it |
 | `image.repository` / `image.tag` | `registry.lab:5000/fathom-mcp` / chart appVersion | Image coordinates; an empty tag falls back to the chart's `appVersion` |
 | `service.port` | `8080` | Container port, Service port, and the listen address |
+| `server.transport` | `http` | `http` (streamable HTTP, what the chart deploys) or `stdio`, which is for `make run-stdio` and has no meaning in a pod |
 | `server.path` | `/mcp` | HTTP path the MCP endpoint is served on |
 | `server.logLevel` | `info` | `debug`, `info`, `warn`, `error` |
 | `k8s.allowedResources` | 18 types | Both the tool allowlist **and** the RBAC rules |
@@ -188,6 +189,11 @@ environment variables. The ones that matter at deploy time:
 | `rbac.namespaces` | `[]` | Non-empty swaps the ClusterRole for per-namespace Roles |
 | `prometheus.url` | `http://prometheus-server.observability.svc.cluster.local:80` | Prometheus HTTP API root. Empty means the three metrics tools are not registered |
 | `prometheus.timeout` | `15s` | Bounds one Prometheus call, and is sent to Prometheus as its own `timeout` |
+| `otel.mode` | `otlp` | `otlp`, `console` or `off` — picks the exporter, not its tuning. See [Telemetry](#telemetry) |
+| `otel.endpoint` | `http://otel-collector.observability.svc.cluster.local:4317` | Collector address. FQDN because it is another namespace; `http://` selects plaintext gRPC |
+| `otel.sampler` | `parentbased_always_on` | Parentbased matters most here: this service is always a child of the agent's span, and disagreeing with the parent would produce half-traces |
+| `otel.metricExportInterval` | `60000` | Milliseconds between metric exports |
+| `otel.environment` | `lab` | Becomes `deployment.environment.name` on every span and metric |
 
 ### `k8s.allowedResources` drives two things at once
 

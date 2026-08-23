@@ -190,7 +190,7 @@ links and Back work while the assets stay a plain file server with no SPA fallba
 ## Configuration
 
 Every knob is a Helm value; the Deployment turns them into `FATHOM_FRONT_*` environment
-variables, the same pattern the other two components use.
+variables, the same pattern the other three components use.
 
 | Value | Default | What it does |
 |---|---|---|
@@ -206,7 +206,11 @@ variables, the same pattern the other two components use.
 | `eval.timeout` | `10s` | Bounds one proxied eval read. Not `agent.timeout`: this is a SQLite query, not a model turn |
 | `front.logLevel` | `info` | `debug`, `info`, `warn`, `error` |
 | `front.maxBodyBytes` | `262144` | Cap on an inbound `/api/chat` body |
-| `otel.mode` | `otlp` | `otlp`, `console` or `off` |
+| `otel.mode` | `otlp` | `otlp`, `console` or `off` — picks the exporter, not its tuning |
+| `otel.endpoint` | `http://otel-collector.observability.svc.cluster.local:4317` | Collector address. FQDN because it is another namespace; `http://` selects plaintext gRPC |
+| `otel.sampler` | `parentbased_always_on` | This service is the trace **root**, so its decision is the one every downstream span inherits |
+| `otel.metricExportInterval` | `60000` | Milliseconds between metric exports |
+| `otel.environment` | `lab` | Becomes `deployment.environment.name` on every span and metric |
 
 ### Why `agent.timeout` is larger than the agent's own
 
@@ -224,7 +228,7 @@ wedged reader holding a browser connection for three minutes before failing.
 
 ## Telemetry
 
-Traces and metrics go to the same collector as the other two components, configured with the
+Traces and metrics go to the same collector as the other three components, configured with the
 same `OTEL_*` variables and the same `otel:` values block.
 
 `fathom-front` is the **trace root**. A browser sends no `traceparent`, so this is where a
@@ -326,6 +330,6 @@ helm uninstall fathom-front
 Changes to `agent.*`, `front.*` or `otel.*` roll the pods automatically — the Deployment
 carries a `checksum/config` annotation over those blocks.
 
-Note that `make release` at the repository root does all of this for all three components at
+Note that `make release` at the repository root does all of this for all four components at
 one version; this chart is wired into it as `deploy-front`, rolled last because its readiness
 depends on the agent's.

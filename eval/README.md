@@ -379,6 +379,92 @@ touch anything not matching `^fathom-eval-`. That second limit is the same belt-
 shape `fathom-mcp` already uses, where the server enforces `allowedNamespaces` itself
 rather than trusting RBAC alone.
 
+## Deploying
+
+### 1. Build and push the image
+
+From `eval/`:
+
+```sh
+make check                    # lock-check, ruff format + lint, pytest, helm lint + template
+make help                     # the full target list
+make push VERSION=0.5.4
+```
+
+The tag matters for the same reason it does in the other three components: the chart
+defaults `image.tag` to `.Chart.AppVersion`. `make image` without `VERSION` derives a
+tag from `git describe`, which will not match — pass `--set image.tag=<tag>` at install
+time in that case.
+
+One image serves all three workloads. The two CronJobs and the read service run the
+same `fathom-eval` binary with different arguments, which is what keeps
+`FATHOM_EVAL_DB_PATH` a single definition in `_helpers.tpl` rather than three that can
+drift.
+
+The registry notes in `../mcp/README.md` apply unchanged — the insecure-registry
+configuration and the `ctr -n k8s.io images import` side-load fallback.
+
+### 2. Install the chart
+
+Unlike `agent/` and `front/`, this chart **creates its own namespace**. `fathom-eval`
+is a different object from `fathom`, so there is no collision with the MCP chart, and
+the separation is the point: this is the one component holding write credentials and it
+is deliberately not in the namespace with the services under test.
+
+```sh
+helm install fathom-eval ./helm
+```
+
+Preview without touching the cluster:
+
+```sh
+helm template fathom-eval ./helm
+helm install fathom-eval ./helm --dry-run
+```
+
+Both CronJobs install **suspended**. Installing a release does not start an
+evaluation; see [Running it](#running-it).
+
+### 3. Verify
+
+There is no rollout to wait on for the CronJobs — a CronJob has no readiness — so the
+install is checked by asserting what was created rather than what became healthy. That
+is also why `make deploy-eval` at the repository root asserts the CronJob's image tag
+instead of gating on a rollout.
+
+```sh
+kubectl -n fathom-eval get cronjob
+# both should show SUSPEND=True on a fresh install
+
+kubectl -n fathom-eval get pvc
+# Pending is correct and expected: local-path is WaitForFirstConsumer, so the volume
+# is not bound until the first Job actually mounts it. Waiting for Bound here would
+# hang forever on a healthy install.
+```
+
+If `serve.enabled` is true there *is* a rollout, and it is the one thing worth
+gating on:
+
+```sh
+kubectl -n fathom-eval rollout status deploy/fathom-eval-serve
+
+kubectl -n fathom-eval port-forward svc/fathom-eval-serve 8083:8080 &
+curl -s localhost:8083/readyz   # /data is mounted and readable
+curl -s localhost:8083/meta     # schema version, file size, mtime
+curl -s localhost:8083/runs     # [] until the first run lands — a 200, not an error
+```
+
+Confirm the write grant is as narrow as it claims, in particular that the harness
+cannot read secrets:
+
+```sh
+kubectl auth can-i --list --as=system:serviceaccount:fathom-eval:fathom-eval
+kubectl auth can-i get secrets --as=system:serviceaccount:fathom-eval:fathom-eval   # no
+
+# and that the read service has nothing at all
+kubectl auth can-i --list --as=system:serviceaccount:fathom-eval:fathom-eval-serve
+```
+
 ## Running it
 
 Both CronJobs ship **suspended**, so deploying a release does not immediately start a
@@ -425,12 +511,183 @@ make -C eval run-judge
 
 2. **The judge instance**, if judging: `sudo ollama/setup.sh --judge`.
 
+## Configuration
+
+Every knob is a Helm value; the templates turn them into `FATHOM_EVAL_*` environment
+variables, the same pattern the other three components use. `_helpers.tpl`'s
+`fathom-eval.env` defines the block once and both CronJobs and the read service share
+it, so the three workloads cannot disagree about the database path.
+
+| Value | Default | What it does |
+|---|---|---|
+| `namespace.name` / `namespace.create` | `fathom-eval` / `true` | Unlike `agent/` and `front/`, this chart owns its namespace — a different object from `fathom`, so no collision |
+| `image.repository` / `image.tag` | `registry.lab:5000/fathom-eval` / chart appVersion | One image for all three workloads |
+| `rbac.create` | `true` | The write grant. See [Write access](#write-access) |
+| `rbac.fixtureNamespaces` | the ten `fathom-eval-*` names | Every namespace the harness may `delete`, by exact name. `create` cannot be name-scoped in RBAC, so this is the tightest half of the grant |
+| `eval.agentUrl` | `http://fathom-agent.fathom.svc.cluster.local:8080` | The in-cluster Service, not the NodePort — dialling a node address from inside the cluster adds a dependency on one node for nothing |
+| `eval.prometheusUrl` | `http://prometheus-server.observability.svc.cluster.local:80` | Port 80, not 9090, which is what that Service listens on |
+| `eval.iterations` | `10` | Iterations per question, per fixture. 10 is the floor, not a target — see [Known limits](#known-limits) |
+| `eval.agentMaxIterations` | `8` | Mirrors `agent/helm` → `agent.maxIterations`. Sizes a sanity bound only; the authoritative ceiling verdict is LangGraph's sentinel string |
+| `eval.requestTimeout` | `240s` | **Must exceed the agent's `requestTimeout` (180s)** so its `504` arrives as a `504` rather than as a client-side abort that loses the agent's own verdict |
+| `eval.teardownTimeout` | `180s` | Budget for destroying a fixture namespace |
+| `eval.dbPath` | `/data/results.db` | On the PVC. One definition, given to all three workloads by `_helpers.tpl` |
+| `eval.fixtures` | `""` | Empty runs the whole suite; a comma-separated list runs a subset, which is how a run is sharded across nights |
+| `eval.logLevel` | `info` | `debug`, `info`, `warn`, `error` |
+| `judge.enabled` | `true` | Whether the judge CronJob is installed at all |
+| `judge.url` | `http://192.168.56.1:11435` | The **CPU-only second** Ollama on the host — not the agent's `:11434`. Must match `ollama/config.env`'s judge block |
+| `judge.model` | `fathom-judge` | The **alias**, never a base tag — the same rule the agent follows |
+| `judge.sample` | `3` | Judgements per fixture+question per run. `0` judges everything. Contested results are judged first, so a small sample lands where a second opinion is worth most |
+| `judge.timeout` | `900s` | Budget for one judgement call |
+| `serve.enabled` | `true` | `false` removes the Deployment, Service and ServiceAccount. The harness still runs and `make db-pull` still works |
+| `serve.service.type` | `ClusterIP` | **Never `NodePort`.** The API is unauthenticated and serves `results.answer` verbatim — including the planted canary when `secret-bait` catches a leak |
+| `serve.service.port` | `8080` | Must agree with `front/helm/values.yaml` → `eval.url` |
+| `serve.maxRows` | `500` | Hard cap on rows in one response, on top of lists carrying no free text |
+| `persistence.enabled` / `.size` | `true` / `2Gi` | The results volume |
+| `persistence.storageClass` | `""` (cluster default) | `local-path`, node-pinned by `WaitForFirstConsumer` — self-consistent, but the history lives on one node's disk |
+| `persistence.keep` | `true` | `helm.sh/resource-policy: keep`. Without it, `helm uninstall` deletes the volume and every night of history with it |
+| `cronjob.suspend` | `true` | **Shipped suspended.** A release deploy would otherwise start a multi-hour evaluation against a cluster rolled seconds ago |
+| `cronjob.schedule` | `0 1 * * *` | The evaluation |
+| `cronjob.judgeSchedule` | `0 7 * * *` | Well after the run window: the judge saturates host CPU, and running it against a live evaluation would inflate the `elapsed_seconds` it exists to measure |
+| `cronjob.activeDeadlineSeconds` | `18000` (5h) | Hard backstop for a stuck run, not a target — a full run is ~2h. Expiry is a SIGKILL |
+| `cronjob.softDeadlineSeconds` | `14400` (4h) | The harness's own deadline, below the hard one, so it stops and tears fixtures down instead of being killed with namespaces still standing |
+| `cronjob.startingDeadlineSeconds` | `600` | How late a missed schedule may still start |
+| `cronjob.terminationGracePeriodSeconds` | `300` | Namespace deletion has to finish inside this |
+| `priorityClass.value` | `-10` | Fixture pods run in a low-priority class with preemption disabled, so `oomkill` and `cpu-throttle` can never evict `fathom-agent` or each other |
+| `otel.mode` | `otlp` | `otlp`, `console` or `off` — picks the exporter, not its tuning |
+| `otel.endpoint` | `http://otel-collector.observability.svc.cluster.local:4317` | FQDN because it is another namespace; `http://` selects plaintext gRPC |
+| `otel.sampler` | `parentbased_always_on` | Parentbased means a judgement never disagrees with the turn that produced it |
+| `otel.environment` | `lab` | Becomes `deployment.environment.name` on every span and metric |
+
+### The three timeouts are a hierarchy, and the order matters
+
+`agent.requestTimeout` (180s, in `agent/helm`) < `eval.requestTimeout` (240s) <
+`cronjob.softDeadlineSeconds` (4h) < `cronjob.activeDeadlineSeconds` (5h).
+
+Each layer outlives the one inside it so that the innermost failure is the one that
+gets reported. If `eval.requestTimeout` fired first, a turn that the agent itself
+gave up on would be recorded as a harness abort and the agent's `504` — which says
+*why* — would never be stored. If the hard deadline fired before the soft one, the
+run would be SIGKILLed with fixture namespaces still standing, and the next night
+would collide with them.
+
+## Telemetry
+
+Traces go to the same collector as the other three components, over OTLP/gRPC in
+plaintext. `FATHOM_EVAL_TELEMETRY` (`otel.mode`) selects the exporter — `otlp`
+(default), `console`, or `off` — and everything else is the standard `OTEL_*`
+variables, read by the SDK directly.
+
+For a local run, `FATHOM_EVAL_TELEMETRY=console make run-local` prints spans to
+**stderr** and needs no collector. Same for `make run-judge` and `make run-serve`.
+
+`eval/src/fathom_eval/telemetry.py` is deliberately thinner than the other three, in
+two ways that are easy to misread as omissions:
+
+- **Traces only. There is no MeterProvider and no `otel.metricExportInterval`.** A
+  batch job has no steady state for an export interval to describe — it runs for two
+  hours a night and is gone. The numbers this component exists to produce are rows in
+  `results.db`, where the rubrics can grade them and a query can compare them across
+  nights, which is not something a metric stream does well.
+- **No manual spans, and no inbound instrumentation on the CronJob side.** The
+  harness is instrumented at the one boundary it has: `HTTPXClientInstrumentor` on
+  the calls out to `fathom-agent` and the judge. That is what puts an evaluation turn
+  in the same trace as the `fathom-agent` and `fathom-mcp` work it caused, so a slow
+  turn can be followed straight through. `off` still installs the propagator, so a
+  harness with telemetry disabled does not break the trace for the services it calls.
+
+The read service is the exception, since it *is* a server: it adds
+`AioHttpServerInstrumentor`, and excludes its probes the way everything else in
+Fathom does. `serve.py` sets `OTEL_PYTHON_AIOHTTP_SERVER_EXCLUDED_URLS` itself rather
+than leaving it to the chart — the exclusion is a property of the code, not of a
+deployment.
+
 ## Targets
 
 `make -C eval <target>` — the shared vocabulary works here as in the other three:
 `help build fmt lint test check image push lint-chart render-chart run-local version
 clean all`. Component-specific: `venv`, `lock`, `lock-check`, `run-judge`, `run-now`,
 `db-pull`.
+
+## Troubleshooting
+
+**Every fixture fails identically.** Almost always one of the two prerequisites above
+rather than the agent. Check the fixture image resolves
+(`registry.lab:5000/fathom-eval-fixture:1`) and, if the failures are on the judge side,
+that the CPU-only Ollama is up and bound to the node network:
+
+```sh
+curl -s http://192.168.56.1:11435/api/version
+```
+
+A judge bound to `127.0.0.1` answers from the host and times out from the cluster,
+which looks like a slow judge rather than an unreachable one.
+
+**The PVC is `Pending`.** Correct on a fresh install and not a fault. `local-path` is
+`WaitForFirstConsumer`, so the volume binds when the first Job mounts it. It becomes a
+real problem only if it is still `Pending` *after* a Job has started.
+
+**A Job is `Running` but nothing lands in the database.** Results are written per
+result, not at the end, so an empty table after several minutes means the run has not
+got past setup. Check the harness can still create namespaces —
+`kubectl auth can-i create namespaces --as=system:serviceaccount:fathom-eval:fathom-eval`
+— and look for fixture namespaces stuck `Terminating` from a previous run.
+
+**Fixture namespaces left standing.** A run SIGKILLed at `activeDeadlineSeconds` never
+reaches teardown. `cronjob.softDeadlineSeconds` exists to make this rare, but when it
+happens, clean up before the next night:
+
+```sh
+kubectl get ns -o name | grep '^namespace/fathom-eval-' | xargs -r kubectl delete --wait=false
+```
+
+The harness refuses in code to touch anything not matching `^fathom-eval-`, so that
+prefix is safe to script against.
+
+**`make run-now` refuses.** By design: it will not start while a `fathom-eval` pod is
+`Running` or `Pending`. `concurrencyPolicy: Forbid` only covers Jobs the CronJob
+controller creates, so nothing else would stop a hand-made Job landing on top of a live
+run and colliding on the fixture namespaces and the database.
+
+**The read service is ready but `/runs` is empty.** A 200 with `[]` is the correct
+answer for a cluster whose CronJob has never run. `/readyz` reports on the *mount*, not
+on the file — an absent `/data` is a deploy fault, an absent `results.db` is not. Check
+`/meta` for the file's size and mtime.
+
+**The read service will not start on an otherwise healthy database.** Look for a `-wal`
+with no `-shm`, left by a run that was SIGKILLed. This is why the volume is mounted
+read-write even though the connection is read-only; if you have changed that, change it
+back and read the note in [The read service](#the-read-service).
+
+**`fathom-front` shows no eval tab.** That gate is in the other chart:
+`front/helm/values.yaml` → `eval.url` must be set to this release's Service. Empty
+means no route and no tab, by design.
+
+## Upgrade and uninstall
+
+```sh
+helm upgrade fathom-eval ./helm --set image.tag=0.5.5
+helm uninstall fathom-eval
+```
+
+Changes to `eval.*`, `serve.*` or `otel.*` roll the read service automatically — its
+Deployment carries a `checksum/config` annotation over those blocks. The CronJobs need
+no such thing: each Job picks up the current template when it is created.
+
+**`helm uninstall` leaves the PVC behind**, and that is deliberate —
+`persistence.keep: true` puts `helm.sh/resource-policy: keep` on it, because otherwise
+the reclaim policy would take every night of history with the release. To actually
+discard the results:
+
+```sh
+kubectl -n fathom-eval delete pvc fathom-eval
+```
+
+Pull a copy first if there is any chance you want it — `make db-pull` copies
+`results.db` out of the cluster.
+
+An upgrade that changes `rbac.fixtureNamespaces` changes the write grant. Re-check it
+afterwards with `kubectl auth can-i --list` rather than assuming the template did what
+you meant.
 
 ## Known limits
 

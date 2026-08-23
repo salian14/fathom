@@ -127,6 +127,8 @@ judge nothing.
   value: {{ .Values.otel.endpoint | quote }}
 - name: OTEL_EXPORTER_OTLP_PROTOCOL
   value: grpc
+- name: OTEL_TRACES_SAMPLER
+  value: {{ .Values.otel.sampler | quote }}
 - name: OTEL_RESOURCE_ATTRIBUTES
   value: "deployment.environment.name={{ .Values.otel.environment }}"
 {{- with .Values.extraEnv }}
