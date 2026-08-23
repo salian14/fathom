@@ -135,6 +135,7 @@ From `agent/`:
 
 ```sh
 make check                    # lock-check, ruff format + lint, pytest, helm lint + template
+make contract                 # this component's published interface, as JSON
 make help                     # the full target list
 make push VERSION=0.5.1
 ```
@@ -395,3 +396,19 @@ helm uninstall fathom-agent
 
 Changes to `agent.*`, `ollama.*`, `mcp.*` or `otel.*` roll the pods automatically —
 the Deployment carries a `checksum/config` annotation over those blocks.
+
+## The published contract
+
+`contracts/agent/` describes this service's interface, and is **generated** — never
+edit it. `make contract` here prints what this component knows about itself; the writer
+in `scripts/contracts.py` merges in the chart's view and cross-checks the two, so a
+default listen port that stops matching `service.port` fails rather than shipping.
+
+```sh
+make contract              # this component's contract, as JSON on stdout
+make -C .. contracts COMPONENT=agent
+make -C .. contracts-check # fail on drift; also part of the root `make check`
+```
+
+`make -C .. hooks` installs the pre-commit hook that regenerates it for you.
+`contracts/agent/integration-notes.md` is the one file in there written by hand.

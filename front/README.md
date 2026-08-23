@@ -66,6 +66,7 @@ From `front/`:
 
 ```sh
 make check                    # gofmt, go vet, go test, UI checks, helm lint + template
+make contract                 # this component's published interface, as JSON
 make help                     # the full target list
 make push VERSION=0.5.1
 ```
@@ -333,3 +334,19 @@ carries a `checksum/config` annotation over those blocks.
 Note that `make release` at the repository root does all of this for all four components at
 one version; this chart is wired into it as `deploy-front`, rolled last because its readiness
 depends on the agent's.
+
+## The published contract
+
+`contracts/front/` describes this service's interface, and is **generated** — never
+edit it. `make contract` here prints what this component knows about itself; the writer
+in `scripts/contracts.py` merges in the chart's view and cross-checks the two, so a
+default listen port that stops matching `service.port` fails rather than shipping.
+
+```sh
+make contract              # this component's contract, as JSON on stdout
+make -C .. contracts COMPONENT=front
+make -C .. contracts-check # fail on drift; also part of the root `make check`
+```
+
+`make -C .. hooks` installs the pre-commit hook that regenerates it for you.
+`contracts/front/integration-notes.md` is the one file in there written by hand.

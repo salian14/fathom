@@ -12,6 +12,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/spellbound/fathom/mcp/internal/config"
+	"github.com/spellbound/fathom/mcp/internal/telemetry"
 	"github.com/spellbound/fathom/mcp/internal/tools"
 )
 
@@ -107,6 +108,17 @@ func contract(ctx context.Context, w io.Writer) error {
 					"outage rather than a deployment choice.",
 				"tools": onlyIn(withMetrics, always),
 			},
+		},
+		// Recorded by the config helpers during the Load above, so it is what
+		// Load reads rather than a table kept beside it.
+		"config": config.Describe(),
+		"telemetry": map[string]any{
+			"traces":  true,
+			"metrics": true,
+			"instruments": append(
+				append([]telemetry.MetricDoc{}, telemetry.MetricDocs()...),
+				tools.MetricDocs()...),
+			"exporter_var": "FATHOM_MCP_TELEMETRY",
 		},
 		"defaults": map[string]any{
 			"addr":               base.Addr,

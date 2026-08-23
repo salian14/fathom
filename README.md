@@ -292,6 +292,9 @@ mcp/            Go MCP server — cmd/, internal/, Dockerfile, helm/
 front/          Go chat + eval UI — cmd/, internal/ (assets embedded), Dockerfile, helm/
 eval/           Python eval harness — src/fathom_eval/ (fixtures + rubrics packaged), helm/
 ollama/         host-side setup — config.env (every knob) + setup.sh (applies them)
+contracts/      GENERATED — what each service publishes. Never edit; `make contracts`
+scripts/        contracts.py, the writer behind `make contracts`
+.githooks/      the opt-in pre-commit hook; install with `make hooks`
 Makefile        cuts one version across all four components at once
 ```
 
@@ -470,6 +473,23 @@ Knobs: `ALLOW_DIRTY=1`, `SKIP_CHECK=1`, `NO_COMMIT=1`, `NO_TAG=1`, `HELM_NAMESPA
 of any kind — every gate described above runs from a Makefile, on a workstation, when
 someone types it. A green tree means someone ran `make check`, not that anything checked
 it automatically.
+
+**One exception, and it is opt-in: a pre-commit hook.** `make hooks` points
+`core.hooksPath` at the checked-in `.githooks/`, after which committing a change to a
+component regenerates that component's `contracts/` entry and includes it in the same
+commit. It exists because a generated artifact has to be held to the code it describes
+at *some* moment, and with no CI a commit is the only moment there is.
+
+It is deliberately narrow. It only regenerates — it runs no tests and no linters, so a
+commit is not slowed by the gates you were going to run anyway. It only touches the
+components a commit touches, so a docs-only commit does nothing. Bypass it once with
+`git commit --no-verify`, always with `FATHOM_SKIP_CONTRACTS=1`, and uninstall it with
+`git config --unset core.hooksPath`. Nothing else in the repo installs it for you:
+pointing `core.hooksPath` into the working tree means a `git pull` can change what runs
+on your machine at commit time, which is a thing to opt into knowingly.
+
+Whether or not you install it, `make contracts-check` fails on a drifted contract and is
+part of the root `make check`.
 
 The one thing that *does* run on a schedule is `eval/`, as two Kubernetes CronJobs — but
 they measure the deployed agent's answer quality, not the tree, and both ship suspended.

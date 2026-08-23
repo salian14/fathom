@@ -1,0 +1,8 @@
+{
+  "exporter_var": "FATHOM_FRONT_TELEMETRY",
+  "instruments": [],
+  "layout_version": 1,
+  "metrics": true,
+  "note": "The one service that is a trace root: a browser sends no traceparent, so unlike fathom-mcp this does not drop untraced inbound requests. Only /healthz and /readyz are excluded.",
+  "traces": true
+}

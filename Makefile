@@ -183,8 +183,9 @@ contracts: contract-venv
 
 # Regenerates into a temp tree and diffs, so a drifted contract is reported
 # without being silently repaired -- `make contracts` is how you repair it.
-# integration-notes.md is excluded: it is hand-written and the writer only ever
-# creates it, so a missing one in the temp tree is not drift.
+# The two hand-written things are excluded: integration-notes.md, which the writer
+# only ever creates and never rewrites, and contracts/README.md. Neither exists in
+# a freshly generated tree, and neither absence is drift.
 .PHONY: contracts-check
 contracts-check: contract-venv
 	@py="$(CONTRACT_PY)"; [ -n "$$py" ] || py=eval/.venv/bin/python; \
@@ -193,10 +194,10 @@ contracts-check: contract-venv
 	scope="$(COMPONENT)"; rc=0; : >"$$tmp.diff"; \
 	if [ -n "$$scope" ]; then \
 	  for c in $$scope; do \
-	    diff -r -x integration-notes.md "contracts/$$c" "$$tmp/$$c" >>"$$tmp.diff" 2>&1 || rc=1; \
+	    diff -r -x integration-notes.md -x README.md "contracts/$$c" "$$tmp/$$c" >>"$$tmp.diff" 2>&1 || rc=1; \
 	  done; \
 	else \
-	  diff -r -x integration-notes.md contracts "$$tmp" >>"$$tmp.diff" 2>&1 || rc=1; \
+	  diff -r -x integration-notes.md -x README.md contracts "$$tmp" >>"$$tmp.diff" 2>&1 || rc=1; \
 	fi; \
 	if [ $$rc -eq 0 ]; then \
 	  echo "==> contracts up to date"; \

@@ -162,12 +162,46 @@ def _require_url(name: str, raw: str) -> None:
         raise ValueError(f"{ENV_PREFIX}{name} must be an absolute http(s) URL, got {raw!r}")
 
 
+# --- the recorded config surface -------------------------------------------------
+#
+# Every variable this component reads goes through one of the four helpers below, so
+# recording the lookup here is what makes the published config surface complete by
+# construction. A table maintained beside load() would be a second source of truth
+# and would drift the first time someone added a variable without updating it.
+_DECLARED: list[dict[str, str]] = []
+
+
+def describe() -> list[dict[str, str]]:
+    """The variables load() reads, in declaration order and without duplicates.
+
+    Meaningful only after load() has run at least once.
+    """
+    seen: set[str] = set()
+    out: list[dict[str, str]] = []
+    for entry in _DECLARED:
+        if entry["name"] not in seen:
+            seen.add(entry["name"])
+            out.append(entry)
+    return out
+
+
+def _record(name: str, kind: str, default: object) -> None:
+    _DECLARED.append({"name": ENV_PREFIX + name, "type": kind, "default": str(default)})
+
+
 def _env(name: str, default: str) -> str:
+    _record(name, "string", default)
     return os.environ.get(ENV_PREFIX + name, default)
 
 
+def _raw(name: str) -> str:
+    """Read without recording: the typed helpers record their own type and default."""
+    return os.environ.get(ENV_PREFIX + name, "")
+
+
 def _env_int(name: str, default: int) -> int:
-    raw = _env(name, "").strip()
+    _record(name, "int", default)
+    raw = _raw(name).strip()
     if not raw:
         return default
     try:
@@ -177,7 +211,8 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    raw = _env(name, "").strip().lower()
+    _record(name, "bool", default)
+    raw = _raw(name).strip().lower()
     if not raw:
         return default
     if raw in ("1", "true", "yes", "on"):
@@ -189,7 +224,8 @@ def _env_bool(name: str, default: bool) -> bool:
 
 def _env_duration(name: str, default: float) -> float:
     """Bare seconds or a Go-style duration, matching the other components' knobs."""
-    raw = _env(name, "").strip().lower()
+    _record(name, "duration", default)
+    raw = _raw(name).strip().lower()
     if not raw:
         return default
     multiplier = 1.0
@@ -210,7 +246,8 @@ def _env_duration(name: str, default: float) -> float:
 
 
 def _env_level(name: str, default: int) -> int:
-    raw = _env(name, "").strip().upper()
+    _record(name, "log level", logging.getLevelName(default))
+    raw = _raw(name).strip().upper()
     if not raw:
         return default
     levels = logging.getLevelNamesMapping()

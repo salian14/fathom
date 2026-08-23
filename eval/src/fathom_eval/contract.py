@@ -25,7 +25,7 @@ import sys
 from typing import Any
 
 from . import __version__, store
-from .config import ENV_PREFIX, load
+from .config import ENV_PREFIX, describe, load
 from .fixtures import load_all
 from .serve import RESPONSE_SCHEMAS, build_app
 
@@ -161,6 +161,20 @@ def build() -> dict[str, Any]:
         "version": __version__,
         "openapi": spec,
         "probes": {"liveness": "/healthz", "readiness": "/readyz"},
+        # Recorded by the config helpers during the load() above, so it is what
+        # load() reads rather than a table kept beside it.
+        "config": describe(),
+        "telemetry": {
+            "traces": True,
+            # Deliberate, and not an omission to be fixed: this component builds a
+            # TracerProvider and no MeterProvider. A batch job has no steady state
+            # for an export interval to describe, and the numbers it produces belong
+            # in results.db, which is published here as storage rather than as a
+            # metric stream.
+            "metrics": False,
+            "instruments": [],
+            "exporter_var": "FATHOM_EVAL_TELEMETRY",
+        },
         "defaults": {
             "serve_addr": cfg.serve_addr,
             "serve_max_rows": cfg.serve_max_rows,

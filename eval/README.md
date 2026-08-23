@@ -604,9 +604,9 @@ deployment.
 ## Targets
 
 `make -C eval <target>` — the shared vocabulary works here as in the other three:
-`help build fmt lint test check image push lint-chart render-chart run-local version
-clean all`. Component-specific: `venv`, `lock`, `lock-check`, `run-judge`, `run-now`,
-`db-pull`.
+`help build fmt lint test check image push lint-chart render-chart contract run-local
+version clean all`. Component-specific: `venv`, `lock`, `lock-check`, `run-judge`,
+`run-now`, `db-pull`.
 
 ## Troubleshooting
 
@@ -723,3 +723,19 @@ you meant.
   and its hard rule, and the prompt gains the remediation block. Prefill is two thirds
   of the cost, so expect a judgement to run somewhat over the measured 96 s. That figure
   above has not been re-measured against v2.
+
+## The published contract
+
+`contracts/eval/` describes this service's interface, and is **generated** — never
+edit it. `make contract` here prints what this component knows about itself; the writer
+in `scripts/contracts.py` merges in the chart's view and cross-checks the two, so a
+default listen port that stops matching `service.port` fails rather than shipping.
+
+```sh
+make contract              # this component's contract, as JSON on stdout
+make -C .. contracts COMPONENT=eval
+make -C .. contracts-check # fail on drift; also part of the root `make check`
+```
+
+`make -C .. hooks` installs the pre-commit hook that regenerates it for you.
+`contracts/eval/integration-notes.md` is the one file in there written by hand.

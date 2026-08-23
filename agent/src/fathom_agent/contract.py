@@ -22,7 +22,7 @@ from typing import Any
 
 from . import __version__
 from .api import create_app
-from .config import ENV_PREFIX, load
+from .config import ENV_PREFIX, describe, load
 
 # The version of the document this module emits, not of anything it describes.
 # Bump it when the shape below changes, so a reader that caches contracts can
@@ -51,6 +51,25 @@ def build() -> dict[str, Any]:
         "version": __version__,
         "openapi": spec,
         "probes": {"liveness": "/healthz", "readiness": "/readyz"},
+        # Recorded by the config helpers during the load() above, so it is what
+        # load() reads rather than a table kept beside it.
+        "config": describe(),
+        "telemetry": {
+            "traces": True,
+            "metrics": True,
+            "exporter_var": "FATHOM_AGENT_TELEMETRY",
+            "instruments": [
+                {
+                    "name": "fathom.chat.turn.duration",
+                    "kind": "histogram",
+                    "unit": "s",
+                    "description": "Wall time of a POST /chat turn, by outcome.",
+                    # A closed set. Question text, session ids and tool arguments
+                    # are span attributes and must stay that way.
+                    "attributes": ["outcome"],
+                }
+            ],
+        },
         "defaults": {
             "addr": cfg.addr,
             "model": cfg.model,

@@ -46,6 +46,7 @@ Run the gates first if you are about to ship this anywhere:
 
 ```sh
 make check   # gofmt, go vet, go test, helm lint + template
+make contract # this component's published interface, as JSON
 make help    # the full target list
 ```
 
@@ -383,3 +384,19 @@ life of the pod and none of them saying anything a span could add:
 `tools/call` is exempt from that last rule. It is the actual work and it is low
 volume, so keeping it means a propagation failure shows up as unparented root
 spans rather than as silence.
+
+## The published contract
+
+`contracts/mcp/` describes this service's interface, and is **generated** — never
+edit it. `make contract` here prints what this component knows about itself; the writer
+in `scripts/contracts.py` merges in the chart's view and cross-checks the two, so a
+default listen port that stops matching `service.port` fails rather than shipping.
+
+```sh
+make contract              # this component's contract, as JSON on stdout
+make -C .. contracts COMPONENT=mcp
+make -C .. contracts-check # fail on drift; also part of the root `make check`
+```
+
+`make -C .. hooks` installs the pre-commit hook that regenerates it for you.
+`contracts/mcp/integration-notes.md` is the one file in there written by hand.

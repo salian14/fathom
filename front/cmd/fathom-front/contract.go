@@ -72,6 +72,21 @@ func contract(w io.Writer) error {
 			"liveness":  "/healthz",
 			"readiness": "/readyz",
 		},
+		// Recorded by the config helpers during the Load above, so it is what
+		// Load reads rather than a table kept beside it.
+		"config": config.Describe(),
+		"telemetry": map[string]any{
+			"traces":  true,
+			"metrics": true,
+			// This service defines no instruments of its own: its metrics come
+			// from otelhttp on the two boundaries, whose names are the HTTP
+			// semantic conventions rather than anything published here.
+			"instruments":  []any{},
+			"exporter_var": "FATHOM_FRONT_TELEMETRY",
+			"note": "The one service that is a trace root: a browser sends no " +
+				"traceparent, so unlike fathom-mcp this does not drop untraced " +
+				"inbound requests. Only /healthz and /readyz are excluded.",
+		},
 		"defaults": map[string]any{
 			"addr":           cfg.Addr,
 			"agent_url":      cfg.AgentURL,

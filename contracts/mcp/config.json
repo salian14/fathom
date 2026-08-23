@@ -1,0 +1,116 @@
+{
+  "layout_version": 1,
+  "note": "Recorded by the config loader as it ran, not parsed out of it: every variable goes through one of a handful of env helpers, and those helpers record what they were asked for.",
+  "variables": [
+    {
+      "default": "http",
+      "name": "FATHOM_MCP_TRANSPORT",
+      "type": "string"
+    },
+    {
+      "default": ":8080",
+      "name": "FATHOM_MCP_ADDR",
+      "type": "string"
+    },
+    {
+      "default": "/mcp",
+      "name": "FATHOM_MCP_MCP_PATH",
+      "type": "string"
+    },
+    {
+      "default": "",
+      "name": "FATHOM_MCP_KUBECONFIG_PATH",
+      "type": "string"
+    },
+    {
+      "default": "pods,services,nodes,namespaces,events,configmaps,persistentvolumeclaims,serviceaccounts,endpoints,replicationcontrollers,deployments.apps,replicasets.apps,statefulsets.apps,daemonsets.apps,jobs.batch,cronjobs.batch,ingresses.networking.k8s.io,networkpolicies.networking.k8s.io",
+      "name": "FATHOM_MCP_ALLOWED_RESOURCES",
+      "type": "string"
+    },
+    {
+      "default": "",
+      "name": "FATHOM_MCP_ALLOWED_NAMESPACES",
+      "type": "string"
+    },
+    {
+      "default": "default",
+      "name": "FATHOM_MCP_DEFAULT_NAMESPACE",
+      "type": "string"
+    },
+    {
+      "default": "otlp",
+      "name": "FATHOM_MCP_TELEMETRY",
+      "type": "string"
+    },
+    {
+      "default": "",
+      "name": "FATHOM_MCP_PROMETHEUS_URL",
+      "type": "string"
+    },
+    {
+      "default": "200",
+      "name": "FATHOM_MCP_LIST_LIMIT",
+      "type": "int"
+    },
+    {
+      "default": "65536",
+      "name": "FATHOM_MCP_MAX_BYTES",
+      "type": "int"
+    },
+    {
+      "default": "200",
+      "name": "FATHOM_MCP_LOG_TAIL_LINES",
+      "type": "int"
+    },
+    {
+      "default": "2000",
+      "name": "FATHOM_MCP_LOG_MAX_TAIL_LINES",
+      "type": "int"
+    },
+    {
+      "default": "32768",
+      "name": "FATHOM_MCP_LOG_MAX_BYTES",
+      "type": "int"
+    },
+    {
+      "default": "30s",
+      "name": "FATHOM_MCP_REQUEST_TIMEOUT",
+      "type": "duration"
+    },
+    {
+      "default": "INFO",
+      "name": "FATHOM_MCP_LOG_LEVEL",
+      "type": "log level"
+    },
+    {
+      "default": "15s",
+      "name": "FATHOM_MCP_PROMETHEUS_TIMEOUT",
+      "type": "duration"
+    },
+    {
+      "default": "500",
+      "name": "FATHOM_MCP_METRICS_LIST_LIMIT",
+      "type": "int"
+    },
+    {
+      "default": "500",
+      "name": "FATHOM_MCP_METRICS_SERIES_LIMIT",
+      "type": "int"
+    },
+    {
+      "default": "50",
+      "name": "FATHOM_MCP_METRICS_LABEL_VALUES",
+      "type": "int"
+    },
+    {
+      "default": "100",
+      "name": "FATHOM_MCP_PROMQL_MAX_SERIES",
+      "type": "int"
+    },
+    {
+      "default": "2048",
+      "name": "FATHOM_MCP_PROMQL_MAX_QUERY_LENGTH",
+      "type": "int"
+    }
+  ]
+}

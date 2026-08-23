@@ -298,6 +298,23 @@ def write_component(component: str, root: Path) -> list[Path]:
     written = [out / "service.json"]
     dump(out / "service.json", service_document(component, contract, facts))
 
+    if "config" in contract:
+        dump(
+            out / "config.json",
+            {
+                "layout_version": LAYOUT_VERSION,
+                "note": "Recorded by the config loader as it ran, not parsed out of it: "
+                "every variable goes through one of a handful of env helpers, and those "
+                "helpers record what they were asked for.",
+                "variables": contract["config"],
+            },
+        )
+        written.append(out / "config.json")
+
+    if "telemetry" in contract:
+        dump(out / "telemetry.json", {"layout_version": LAYOUT_VERSION, **contract["telemetry"]})
+        written.append(out / "telemetry.json")
+
     if "openapi" in contract:
         spec = contract["openapi"]
         spec.setdefault("info", {})["version"] = chart_version(component)

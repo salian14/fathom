@@ -393,3 +393,54 @@ def test_the_contract_is_byte_stable():
     first = json.dumps(build(), indent=2, sort_keys=True)
     second = json.dumps(build(), indent=2, sort_keys=True)
     assert first == second
+
+
+def test_declared_metric_attributes_are_what_is_recorded():
+    """The telemetry contract's attribute keys are the one thing in contracts/ that
+    cannot be read off a live provider -- keys are chosen at record time, not at
+    instrument creation -- so the declaration is hand-written and worth exactly as
+    much as this test.
+
+    It is also the rule conventions.md prohibition 4 exists for: anything from the
+    question or the answer added to this stream multiplies the time series, and that
+    change looks harmless in review. It fails here instead."""
+    from opentelemetry import metrics
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from fathom_agent.contract import build
+
+    reader = InMemoryMetricReader()
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+
+    class _Span:
+        def set_attribute(self, *args):
+            pass
+
+        def record_exception(self, *args):
+            pass
+
+    api._record_turn(_Span(), "ok", 0.0)
+
+    observed: set[str] = set()
+    found = False
+    for rm in reader.get_metrics_data().resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name != "fathom.chat.turn.duration":
+                    continue
+                found = True
+                for point in metric.data.data_points:
+                    observed |= set(point.attributes or {})
+    assert found, "the turn histogram was never recorded"
+
+    declared = {
+        key
+        for instrument in build()["telemetry"]["instruments"]
+        if instrument["name"] == "fathom.chat.turn.duration"
+        for key in instrument["attributes"]
+    }
+    assert observed == declared, (
+        f"recorded {sorted(observed)} but declared {sorted(declared)}. If a new key is "
+        f"not a closed set, it belongs on the span rather than on this histogram."
+    )
