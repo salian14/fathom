@@ -271,14 +271,22 @@ deploy-front: guard-next
 	@kubectl -n $(FATHOM_NS) rollout status deploy/fathom-front --timeout=$(ROLLOUT_TIMEOUT)
 	@echo "==> fathom-front ready at $(NEXT)"
 
-# Last, and unlike the other three it cannot gate on a rollout: a CronJob has no
-# rollout to wait for, and there is no pod to become ready between scheduled runs.
+# Last. Gates in two parts, because this chart holds two kinds of workload.
 #
-# Nor can it wait for the PVC to be Bound. The cluster's default StorageClass is
-# local-path with WaitForFirstConsumer, so the claim stays Pending *by design* until
-# something mounts it -- waiting on Bound here would hang until the timeout on a
-# perfectly healthy install. The gate is therefore what can actually be asserted: the
-# CronJob exists and its jobTemplate carries the tag we just pushed.
+# The CronJobs cannot be waited on: a CronJob has no rollout, and between scheduled
+# runs there is no pod to become ready. Nor can we wait for the PVC to be Bound on
+# their account -- the cluster's default StorageClass is local-path with
+# WaitForFirstConsumer, so an unmounted claim stays Pending by design. What can be
+# asserted is that the CronJob exists and its jobTemplate carries the tag we pushed.
+#
+# The read service is a Deployment and does have a rollout, so it is waited on --
+# guarded by a `get`, because serve.enabled=false is a supported install and its
+# absence is not a failure. It is also now the PVC's first consumer on a fresh
+# install, which means the claim binds at deploy time rather than at the first run.
+# That is a change in behaviour from when this chart was CronJobs only, and it is
+# fine: binding becomes deterministic and early, and the Deployment carries the same
+# scheduling constraints as the CronJobs so it cannot strand the volume on a node
+# they cannot reach.
 #
 # Note the chart ships both CronJobs suspended. `make deploy` should not start a
 # multi-hour evaluation against a cluster it finished rolling seconds ago; unsuspending
@@ -293,6 +301,10 @@ deploy-eval: guard-next
 	 case "$$img" in *:$(NEXT)) ;; \
 	   *) echo "error: fathom-eval CronJob is set to run $$img, expected :$(NEXT)"; exit 1;; esac
 	@echo "==> fathom-eval scheduled at $(NEXT) (suspended: $$(kubectl -n $(EVAL_NS) get cronjob fathom-eval -o jsonpath='{.spec.suspend}'))"
+	@if kubectl -n $(EVAL_NS) get deploy fathom-eval-serve >/dev/null 2>&1; then \
+	  echo "==> waiting for fathom-eval-serve"; \
+	  kubectl -n $(EVAL_NS) rollout status deploy/fathom-eval-serve --timeout=$(ROLLOUT_TIMEOUT); \
+	fi
 
 # Preview only: this renders the *current* charts with the next image tag, so the
 # chart labels still read the old version until `make bump` has run.

@@ -44,6 +44,26 @@ agent:
   # readiness for 30s, so this never waits on a real dependency check.
   readyTimeout: 5s
 
+eval:
+  # fathom-eval's read service, for the eval view. EMPTY BY DEFAULT, and empty
+  # disables the view entirely -- no /api/eval route is registered and the page
+  # shows no switcher.
+  #
+  # Same gate as fathom-mcp's prometheus.url, for the same reason: a feature
+  # that fails on every use is worse than one that is not there. Most installs
+  # will not have run the eval harness, and they should not be shown a tab that
+  # only ever errors.
+  #
+  # An FQDN because the service lives in another namespace:
+  #   http://fathom-eval-serve.fathom-eval.svc.cluster.local:8080
+  # Must match eval/helm/values.yaml -> serve.service.port and the release name.
+  url: ""
+  # Bounds one proxied read. Deliberately not agent.timeout's 200s: that number
+  # is large because a model turn takes minutes, while this is a SELECT against
+  # a local SQLite file. Sharing it would mean a wedged reader holding a browser
+  # connection for three minutes.
+  timeout: 10s
+
 front:
   logLevel: info
   # A question plus a context-capped transcript is a few kilobytes. 256Ki is
