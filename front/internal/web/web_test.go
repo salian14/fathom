@@ -1,6 +1,7 @@
 package web
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,7 +36,7 @@ func TestServesAssets(t *testing.T) {
 		t.Fatalf("Handler(): %v", err)
 	}
 
-	for _, path := range []string{"/app.js", "/styles.css"} {
+	for _, path := range []string{"/app.js", "/evals.js", "/styles.css"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code != http.StatusOK {
@@ -54,24 +55,60 @@ func TestServesAssets(t *testing.T) {
 //
 // Comments are stripped first: app.js explains this rule in prose, and a test
 // that its own documentation trips is a test people delete.
+//
+// Walks every .js under static/ rather than naming one file. Naming one meant
+// that adding a second script -- which is exactly what the eval view did --
+// silently shipped it unguarded.
 func TestNoHTMLStringSinks(t *testing.T) {
-	js, err := content.ReadFile("static/app.js")
+	scripts, err := fs.Glob(content, "static/*.js")
 	if err != nil {
-		t.Fatalf("reading app.js: %v", err)
+		t.Fatalf("globbing scripts: %v", err)
+	}
+	if len(scripts) < 2 {
+		t.Fatalf("found %d scripts, expected at least app.js and evals.js: %v", len(scripts), scripts)
 	}
 
-	var code strings.Builder
-	for _, line := range strings.Split(string(js), "\n") {
-		if i := strings.Index(line, "//"); i >= 0 {
-			line = line[:i]
+	for _, name := range scripts {
+		js, err := content.ReadFile(name)
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
 		}
-		code.WriteString(line)
-		code.WriteByte('\n')
+
+		var code strings.Builder
+		for _, line := range strings.Split(string(js), "\n") {
+			if i := strings.Index(line, "//"); i >= 0 {
+				line = line[:i]
+			}
+			code.WriteString(line)
+			code.WriteByte('\n')
+		}
+
+		for _, sink := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"} {
+			if strings.Contains(code.String(), sink) {
+				t.Errorf("%s uses %s; model output must be rendered as text", name, sink)
+			}
+		}
+	}
+}
+
+// TestIndexLoadsScriptsInOrder pins a dependency nothing else can see.
+//
+// evals.js calls app.js's rendering helpers, and both are classic scripts
+// sharing one global scope. Reversing the two script tags fails at runtime with
+// a bare ReferenceError, in the browser, with no build step or linter between
+// the mistake and the user.
+func TestIndexLoadsScriptsInOrder(t *testing.T) {
+	index, err := content.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatalf("reading index.html: %v", err)
 	}
 
-	for _, sink := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"} {
-		if strings.Contains(code.String(), sink) {
-			t.Errorf("app.js uses %s; model output must be rendered as text", sink)
-		}
+	app := strings.Index(string(index), `src="app.js"`)
+	evals := strings.Index(string(index), `src="evals.js"`)
+	if app < 0 || evals < 0 {
+		t.Fatalf("index.html must load both scripts: app.js at %d, evals.js at %d", app, evals)
+	}
+	if app > evals {
+		t.Error("evals.js is loaded before app.js; it depends on app.js's helpers")
 	}
 }

@@ -31,9 +31,14 @@ flowchart LR
 
     subgraph cluster["Kubernetes cluster"]
         subgraph nsfathom["namespace: fathom"]
-            front["fathom-front — Go<br/>chat UI, NodePort 30081<br/>no credentials"]
+            front["fathom-front — Go<br/>chat + eval UI, NodePort 30081<br/>no credentials"]
             agent["fathom-agent — Python<br/>agent loop, NodePort 30080<br/>no credentials"]
             mcp["fathom-mcp — Go<br/>six tools, ClusterIP :8080/mcp<br/>ServiceAccount + RBAC"]
+        end
+        subgraph nseval["namespace: fathom-eval"]
+            evalserve["fathom-eval-serve — Python<br/>read-only results API, ClusterIP<br/>no credentials"]
+            evalcron["eval + judge CronJobs<br/>the one write credential"]
+            evaldb[("results.db<br/>PVC")]
         end
         subgraph nsobs["namespace: observability"]
             otel["otel-collector<br/>OTLP/gRPC :4317"]
@@ -43,7 +48,11 @@ flowchart LR
     end
 
     browser -->|"POST /api/chat"| front
+    browser -.->|"GET /api/eval/*"| front
     front -->|"POST /chat"| agent
+    front -.->|"when eval.url is set"| evalserve
+    evalserve --> evaldb
+    evalcron --> evaldb
     agent -->|"MCP over streamable HTTP"| mcp
     agent -->|"HTTP, across the boundary"| ollama
     mcp -->|"client-go — get, list"| kapi
@@ -51,6 +60,7 @@ flowchart LR
     front -.-> otel
     agent -.-> otel
     mcp -.-> otel
+    evalcron -->|"asks the agent, grades the answers"| agent
 ```
 
 ### One turn
@@ -113,7 +123,7 @@ UI counts the seconds out loud so the wait does not read as a hang.
 |  | `fathom-mcp` | `fathom-agent` | `fathom-front` |
 |---|---|---|---|
 | Language | Go 1.26 | Python 3.12 | Go 1.26 |
-| Owns | the six tools, and the only cluster-reading ServiceAccount | the agent loop and `POST /chat` | the chat UI and the `/api/chat` proxy |
+| Owns | the six tools, and the only cluster-reading ServiceAccount | the agent loop and `POST /chat` | the chat and eval views, and the `/api/chat` and `/api/eval` proxies |
 | Built on | MCP Go SDK, client-go | FastAPI, LangGraph | stdlib `net/http` — no framework |
 | K8s credentials | **yes** — ClusterRole, `get`/`list` | none | none |
 | Conversation state | none | none — `/chat` is stateless | none — the transcript lives in the browser |
@@ -357,8 +367,9 @@ make clean
 
 `make` with no target prints `help` in every component, the same way it does at the
 repository root. Targets outside that shared list are component-specific and named so:
-`run-stdio` in `mcp`, `venv`/`lock`/`lock-check` in `agent`, `test-ui` in `front`.
-The Go components also keep `vet` as an alias for `lint`.
+`run-stdio` in `mcp`, `venv`/`lock`/`lock-check` in `agent` and `eval`, `test-ui` in
+`front`, and `run-judge`/`run-now`/`run-serve`/`db-pull` in `eval`. The Go components also
+keep `vet` as an alias for `lint`.
 
 `VERSION` defaults to `git describe --tags --always --dirty`, which produces things like
 `8957f22-dirty`. That will **not** match the chart's `image.tag` default, which falls back
@@ -374,7 +385,8 @@ Each component runs outside the cluster, on a port chosen not to collide with th
 | `mcp` | `make run-local` | `:8080` | `$KUBECONFIG` — the out-of-cluster fallback path |
 | `mcp` | `make run-stdio` | stdio | `$KUBECONFIG` — the out-of-cluster fallback path |
 | `agent` | `make run-local OLLAMA_URL=http://192.168.56.1:11434` | `:8081` | mcp port-forwarded to `:8080` |
-| `front` | `make run-local` | `:8082` | agent port-forwarded to `:8081` |
+| `front` | `make run-local` | `:8082` | agent port-forwarded to `:8081`; `EVAL_URL=` for the eval view |
+| `eval` | `make run-serve` | `:8083` | a results database — `make db-pull` fetches the cluster's |
 
 So the full local stack is:
 
@@ -383,6 +395,16 @@ kubectl -n fathom port-forward svc/fathom-mcp 8080:8080 &   # or: make -C mcp ru
 make -C agent run-local OLLAMA_URL=http://192.168.56.1:11434 &
 make -C front run-local AGENT_URL=http://localhost:8081
 #   -> http://localhost:8082
+```
+
+The eval view needs none of that — not the agent, not the model, not a cluster beyond one
+copy of the results:
+
+```sh
+make -C eval db-pull                              # results.db out of the cluster
+make -C eval run-serve LOCAL_DB=./results.db &    # :8083
+make -C front run-local EVAL_URL=http://localhost:8083
+#   -> http://localhost:8082/#/evals
 ```
 
 The `run-local` targets select `console` telemetry, so no collector is needed. Console
@@ -423,8 +445,10 @@ of any kind — every gate described above runs from a Makefile, on a workstatio
 someone types it. A green tree means someone ran `make check`, not that anything checked
 it automatically.
 
-The one thing that *does* run on a schedule is `eval/`, as a Kubernetes CronJob — but it
-measures the deployed agent's answer quality, not the tree. It ships suspended.
+The one thing that *does* run on a schedule is `eval/`, as two Kubernetes CronJobs — but
+they measure the deployed agent's answer quality, not the tree, and both ship suspended.
+(That component also runs one always-on workload, `fathom-eval-serve`, but it only reads
+what those jobs wrote.)
 
 `CLAUDE.md` describes a `bifrost` (dev) → `asgard` (prod) branch pipeline and the rules
 that go with it. Those are operational rules for changes to this repo; the pipeline that
@@ -465,6 +489,8 @@ These are the places where two files have to agree. Everything else has exactly 
 | Turn budget | `agent/helm` → `agent.requestTimeout` (180s) | `front/helm` → `agent.timeout` must exceed it |
 | Context window | `ollama/config.env` → `FATHOM_NUM_CTX` (16384) | `agent.maxToolChars`, and `k8s_log`'s caps |
 | Judge model and endpoint | `ollama/config.env` judge block | `eval/helm/values.yaml` → `judge.model`, `judge.url` |
+| Eval read service address | `eval/helm/values.yaml` → `serve.service.port` and the release name | `front/helm/values.yaml` → `eval.url` (empty disables the view) |
+| The results database path | `eval/helm/values.yaml` → `eval.dbPath` | nothing — `_helpers.tpl`'s `fathom-eval.env` gives it to all three eval workloads from one definition |
 | Fixture namespaces | `eval/src/fathom_eval/fixtures/*.yaml` | `eval/helm/values.yaml` → `rbac.fixtureNamespaces` (delete is name-scoped to them) |
 
 The last row is the one that bites. `agent.maxToolChars` (8000) sits on top of the MCP

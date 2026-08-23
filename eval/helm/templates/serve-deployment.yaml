@@ -1,0 +1,145 @@
+{{- if .Values.serve.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fathom-eval.serveFullname" . }}
+  namespace: {{ include "fathom-eval.namespace" . }}
+  labels:
+    {{- include "fathom-eval.serveLabels" . | nindent 4 }}
+spec:
+  {{- /*
+    One. There is no state to scale and the claim is ReadWriteOnce.
+  */}}
+  replicas: 1
+  {{- /*
+    Recreate, not RollingUpdate. A rolling update wants the old and new pods alive at
+    once, which asks the cluster to attach one ReadWriteOnce volume to two of them. On a
+    single node the kubelet will usually allow that -- but "usually", on a volume whose
+    PV is node-pinned by local-path, is how a pod ends up wedged in ContainerCreating with
+    a Multi-Attach error the first time anything sends the new pod elsewhere.
+
+    The cost is a few seconds of downtime on a read-only inspection view during a deploy.
+    Nobody is watching it at that moment; the nightly run is what matters here.
+  */}}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "fathom-eval.serveSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fathom-eval.serveSelectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ printf "%s%s%s" (toYaml .Values.eval) (toYaml .Values.serve) (toYaml .Values.otel) | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "fathom-eval.serveServiceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: fathom-eval-serve
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.serve.service.port }}
+              protocol: TCP
+          env:
+            {{- /*
+              The same block the two CronJobs use. It exists so the judge cannot point at
+              a different database than the run wrote, and a reader pointed at a different
+              database is that same bug wearing a different hat.
+            */}}
+            {{- include "fathom-eval.env" . | nindent 12 }}
+            - name: FATHOM_EVAL_SERVE_ADDR
+              value: ":{{ .Values.serve.service.port }}"
+            - name: FATHOM_EVAL_SERVE_MAX_ROWS
+              value: {{ .Values.serve.maxRows | quote }}
+          volumeMounts:
+            {{- /*
+              Deliberately NOT readOnly: true, and this is not an oversight.
+
+              The database is WAL (store.py sets journal_mode=WAL so the judge can read
+              what a run is writing). A read-only SQLite connection to a WAL database may
+              have to create the -shm index, and that needs write permission on the
+              DIRECTORY, not the file. Measured: with a -wal present and no -shm -- which
+              is what a run SIGKILLed at activeDeadlineSeconds leaves behind -- every open
+              mode fails on a read-only mount, on an otherwise healthy database, with a
+              misleading "unable to open database file".
+
+              The read-only property lives in the connection instead, where it is tested:
+              reporting.connect_ro opens mode=ro with PRAGMA query_only, refuses to create
+              a missing file, and this workload has no write path at all.
+            */}}
+            - name: results
+              mountPath: {{ dir .Values.eval.dbPath }}
+            # readOnlyRootFilesystem is on, and HOME is /tmp.
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 20
+            timeoutSeconds: 3
+          readinessProbe:
+            {{- /*
+              /readyz reports on the mount, not on the data: a results.db that does not
+              exist yet is the normal state of a fresh install and renders as an empty
+              view, while a /data that is not mounted is a deploy fault that should keep
+              this pod out of its Service.
+            */}}
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.serve.resources | nindent 12 }}
+      volumes:
+        - name: results
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "fathom-eval.fullname" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- /*
+        Deliberately the SAME scheduling constraints the CronJobs carry, not a separate
+        set. local-path binds the PV to whichever pod consumes the claim first, and on a
+        fresh install that is now this Deployment rather than the first run. If these
+        could diverge, this pod could bind the volume to a node the CronJob is not
+        allowed onto -- and the nightly evaluation would then never run again, silently.
+      */}}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

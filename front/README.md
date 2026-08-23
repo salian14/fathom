@@ -1,9 +1,13 @@
 # Deploying fathom-front
 
-`fathom-front` is Fathom's chat UI: a static page served from a small Go binary, with
+`fathom-front` is Fathom's UI: a static page served from a small Go binary, with
 `/api/chat` reverse-proxied to `fathom-agent`. It exists because the agent answers over
 `POST /chat` and nothing in the repo held a conversation with it — the endpoint is
 stateless, so multi-turn needs a client that keeps the transcript and replays it.
+
+It has a second view, for inspecting what the evaluation harness measured, with
+`/api/eval/*` reverse-proxied to `fathom-eval`'s read service. That view is **off unless
+`eval.url` is set** — see *The eval view*.
 
 This document covers deploying **this component only**. The agent, the MCP server and the
 host-side Ollama server are separate deliverables; see `../agent/README.md`,
@@ -19,15 +23,23 @@ host-side Ollama server are separate deliverables; see `../agent/README.md`,
   | fathom-front  |----------------------->| fathom-agent  |------------------>|  fathom-mcp  |
   | (this chart)  |                        |               |                   |              |
   +---------------+                        +---------------+                   +--------------+
-                                                   |
-                                                   | /api/chat
-                                                   v
-                                        +----------------------------+
-                                        | Ollama on the HOST machine |
-                                        +----------------------------+
+       |                                           |
+       |                                           | HTTP, across the host boundary
+       |                                           v
+       |                                +----------------------------+
+       |                                | Ollama on the HOST machine |
+       |                                +----------------------------+
+       |
+       | /api/eval/* -> /*      optional: only when eval.url is set
+       v
+  +-----------------------------------------+
+  | fathom-eval-serve                       |
+  | namespace fathom-eval, ClusterIP        |
+  | reads results.db -- no RBAC, no token   |
+  +-----------------------------------------+
 ```
 
-Three things follow from that picture, and they are most of what this component is.
+Four things follow from that picture, and they are most of what this component is.
 
 - **The page and the API share an origin.** The browser never dials the agent. That is why
   `fathom-agent` needs no CORS middleware and could drop its own NodePort entirely: the only
@@ -38,6 +50,9 @@ Three things follow from that picture, and they are most of what this component 
 - **A turn blocks.** The agent does not stream — it runs the whole tool-calling loop and then
   returns one JSON body, typically 30–180 s later. Every timeout in this component is sized
   around that, and the page counts the seconds out loud so the wait does not look like a hang.
+- **The second hop is optional and independent.** `fathom-eval-serve` lives in another
+  namespace and is reached only when `eval.url` is set. It is not a dependency: `/readyz`
+  ignores it entirely, so the eval view being down never takes the chat with it.
 
 ## Prerequisites
 
@@ -145,6 +160,33 @@ silently shortened history changes the answer, which is not a thing to hide.
 Failed turns are never replayed: the agent did not produce them, and feeding it its own error
 messages as assistant turns teaches it nothing.
 
+## The eval view
+
+A second view, at `#/evals`, over what `eval/`'s nightly harness measured: the run list,
+one run's per-fixture and per-check aggregates, and one result with its answer, the fix
+the agent proposed, its tool trace, every deterministic check and every judge verdict.
+
+Three things about it.
+
+**It is off by default.** With `eval.url` empty there is no `/api/eval` route on the mux
+and no tab on the page — the same gate `fathom-mcp` puts on its Prometheus tools, for the
+same reason: a feature that fails on every use is worse than one that is not there. The
+page learns which gates are open from `GET /api/features`, because it is embedded in the
+binary and cannot read an environment variable.
+
+**`/readyz` deliberately ignores it.** That endpoint decides whether this pod is in its
+Service, and an inspection page being unavailable must not take the chat offline with it.
+Eval failures render inline, in their own pane.
+
+**It can show a secret.** `results.answer` holds whatever the model read out of the
+cluster, and when the harness's `secret-bait` fixture catches a leak, the planted canary
+is stored in that column verbatim. Displaying it is the point — it is the evidence that
+the leak happened. Bear it in mind before putting this UI anywhere less private than the
+lab, and note that the eval service itself is ClusterIP for exactly this reason.
+
+Routing is the URL hash (`#/evals`, `#/evals/runs/12`, `#/evals/results/941`), so deep
+links and Back work while the assets stay a plain file server with no SPA fallback.
+
 ## Configuration
 
 Every knob is a Helm value; the Deployment turns them into `FATHOM_FRONT_*` environment
@@ -160,6 +202,8 @@ variables, the same pattern the other two components use.
 | `agent.url` | `http://fathom-agent.fathom.svc.cluster.local:8080` | Base URL only — `/chat` and `/readyz` are the agent's API, not knobs |
 | `agent.timeout` | `200s` | Whole-turn budget for the proxied call. **Must exceed the agent's `requestTimeout`** |
 | `agent.readyTimeout` | `5s` | Bounds the `/readyz` call into the agent |
+| `eval.url` | `""` | fathom-eval's read service. **Empty disables the eval view entirely** — no route, no tab |
+| `eval.timeout` | `10s` | Bounds one proxied eval read. Not `agent.timeout`: this is a SQLite query, not a model turn |
 | `front.logLevel` | `info` | `debug`, `info`, `warn`, `error` |
 | `front.maxBodyBytes` | `262144` | Cap on an inbound `/api/chat` body |
 | `otel.mode` | `otlp` | `otlp`, `console` or `off` |
@@ -171,6 +215,12 @@ a `504` saying `turn exceeded 180s`. If this service timed out first, that messa
 arrive — the browser would get "the agent did not answer in time", which is true but says
 nothing about how long it waited or why. The 20 s of headroom exists so the more informative
 failure is the one that wins. Raise `agent.requestTimeout` and this has to move with it.
+
+### Why `eval.timeout` is not `agent.timeout`
+
+`agent.timeout` is 200s because a model turn takes minutes. An eval read is a `SELECT`
+against a local SQLite file and answers in milliseconds. Sharing one knob would mean a
+wedged reader holding a browser connection for three minutes before failing.
 
 ## Telemetry
 
@@ -202,10 +252,24 @@ make run-local
 to it, 8081 is the agent's `run-local`) and uses `console` telemetry, so no collector is needed. Point it elsewhere
 with `make run-local AGENT_URL=http://...`.
 
+To bring up the eval view too, serve a results database beside it. This needs no agent, no
+model and no cluster — pull a real night's results out and read them locally:
+
+```sh
+make -C ../eval db-pull
+make -C ../eval run-serve LOCAL_DB=./results.db     # :8083
+make run-local EVAL_URL=http://localhost:8083
+#   -> http://localhost:8082/#/evals
+```
+
+`/readyz` will be red without an agent, but readiness is a probe rather than a gate on
+serving, so the page loads and the eval view works.
+
 The UI checks run under plain `node` with no package.json and no build step:
 
 ```sh
 node internal/web/app_test.mjs
+node internal/web/evals_test.mjs
 ```
 
 `make check` runs them, and skips cleanly when node is not installed — the same way
@@ -226,6 +290,20 @@ crashed or was rolled during the turn; the answer is not recoverable, and Retry 
 **A turn returns 504** — read which one. `turn exceeded 180s` is the agent's own message and
 means the model ran long. `the agent did not answer in time` is this service's, and means
 `agent.timeout` is set below the agent's `requestTimeout`.
+
+**There is no Evals tab** — that is the gate, not a fault. `eval.url` is empty, so no route
+is registered and the page does not offer the view. `curl -s <front>/api/features` returns
+`{"eval":false}` and confirms it. Set `eval.url` to the read service's in-cluster address;
+the eval chart's `NOTES.txt` prints it.
+
+**The Evals tab says "No results yet"** — also not a fault. The harness has never completed
+a run, so `/data/results.db` does not exist. Both CronJobs ship suspended; `eval/README.md`
+says how to start one, and `make -C eval run-now` fires one immediately.
+
+**Evals says `eval service unreachable`** — the hop from this pod to `fathom-eval-serve`
+failed. Check `serve.enabled` is true in the eval chart and that the Deployment is ready
+(`kubectl -n fathom-eval get deploy fathom-eval-serve`). Note the message names the eval
+service specifically, so it cannot be confused with an agent failure.
 
 **A turn returns 413** — the transcript outgrew `front.maxBodyBytes`. Start a new chat; the
 client cap should normally prevent this, so seeing it means a single question was enormous.

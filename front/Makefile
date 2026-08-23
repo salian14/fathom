@@ -26,6 +26,10 @@ CHART       := helm
 # the port-forward to it, and not 8081, which is the agent's own run-local.
 LOCAL_PORT  ?= 8082
 AGENT_URL   ?= http://localhost:8081
+# Empty by default, which is the disabled state -- `run-local` then serves the chat
+# view alone, exactly as a deployment with no eval.url does. Point it at
+# `make -C ../eval run-serve` (:8083) to bring up the eval view.
+EVAL_URL    ?=
 
 .PHONY: help
 help:
@@ -46,6 +50,7 @@ help:
 	@echo "  make clean          remove build output"
 	@echo "  make all            check, then build"
 	@echo
+	@echo "        EVAL_URL=<url>  (empty disables the eval view, as in a deployment)"
 	@echo "Knobs:  VERSION=x.y.z  REGISTRY=<host:port>  IMAGE=<ref>  LOCAL_PORT=$(LOCAL_PORT)"
 	@echo "        AGENT_URL=<url>"
 	@echo
@@ -89,7 +94,7 @@ check: fmt lint test test-ui lint-chart
 .PHONY: test-ui
 test-ui:
 	@command -v node >/dev/null 2>&1 || { echo "node not installed, skipping UI checks"; exit 0; }; \
-	node internal/web/app_test.mjs
+	node internal/web/app_test.mjs && node internal/web/evals_test.mjs
 
 .PHONY: image
 image:
@@ -117,6 +122,7 @@ render-chart:
 run-local: build
 	FATHOM_FRONT_ADDR=:$(LOCAL_PORT) \
 	FATHOM_FRONT_AGENT_URL=$(AGENT_URL) \
+	FATHOM_FRONT_EVAL_URL=$(EVAL_URL) \
 	FATHOM_FRONT_TELEMETRY=console \
 	./bin/$(BINARY)
 

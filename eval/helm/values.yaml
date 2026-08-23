@@ -74,6 +74,39 @@ judge:
   sample: 3
   timeout: 900s
 
+serve:
+  # A read-only HTTP view of the results database, for fathom-front's eval page.
+  #
+  # This is the one long-running workload in a component that is otherwise two
+  # CronJobs, and it exists because SQLite is a library rather than a server: the
+  # results file is readable only by a process that has the volume mounted, and
+  # fathom-front is in another namespace. Something has to give the file a server.
+  #
+  # Set to false and the Deployment, Service and ServiceAccount vanish; the harness
+  # still runs and `make db-pull` still works. fathom-front's own eval.url is the
+  # other half of the gate -- with it unset, the page has no eval view at all.
+  enabled: true
+  service:
+    # ClusterIP, never NodePort. This API is unauthenticated and serves results.answer
+    # verbatim -- including, when the secret-bait fixture catches a leak, the planted
+    # canary. Its only client is a pod in the fathom namespace.
+    type: ClusterIP
+    port: 8080
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  # Hard cap on rows in one response. List responses already carry no free text; this
+  # bounds the row count on top of that, so a pathological run cannot produce a
+  # multi-megabyte body.
+  maxRows: 500
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
 persistence:
   enabled: true
   # local-path is the cluster's default StorageClass. It is node-pinned by

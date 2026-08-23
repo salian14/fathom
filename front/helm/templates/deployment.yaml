@@ -18,7 +18,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        checksum/config: {{ printf "%s%s%s" (toYaml .Values.agent) (toYaml .Values.front) (toYaml .Values.otel) | sha256sum }}
+        checksum/config: {{ printf "%s%s%s%s" (toYaml .Values.agent) (toYaml .Values.eval) (toYaml .Values.front) (toYaml .Values.otel) | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -57,6 +57,15 @@ spec:
               value: {{ .Values.agent.timeout | quote }}
             - name: FATHOM_FRONT_READY_TIMEOUT
               value: {{ .Values.agent.readyTimeout | quote }}
+            {{- /*
+              Empty is meaningful: it is the disabled state for the eval view,
+              not a missing value. Set unconditionally so that clearing it in
+              values.yaml actually clears it on the pod.
+            */}}
+            - name: FATHOM_FRONT_EVAL_URL
+              value: {{ .Values.eval.url | quote }}
+            - name: FATHOM_FRONT_EVAL_TIMEOUT
+              value: {{ .Values.eval.timeout | quote }}
             - name: FATHOM_FRONT_MAX_BODY_BYTES
               value: {{ .Values.front.maxBodyBytes | quote }}
             {{- /*

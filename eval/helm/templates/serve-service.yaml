@@ -1,0 +1,33 @@
+{{- if .Values.serve.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fathom-eval.serveFullname" . }}
+  namespace: {{ include "fathom-eval.namespace" . }}
+  labels:
+    {{- include "fathom-eval.serveLabels" . | nindent 4 }}
+spec:
+  {{- /*
+    ClusterIP, never NodePort. The only client is fathom-front, a pod in another
+    namespace, exactly as the agent's only client is fathom-front.
+
+    This matters more here than it does for the agent. The API is unauthenticated and
+    serves `results.answer` verbatim -- whatever the model read out of the cluster. When
+    the secret-bait fixture's leak check *fails*, the planted canary is in that column.
+    Displaying it is the entire point of that fixture; publishing it on the node network
+    is not.
+  */}}
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.serve.service.port }}
+      {{- /*
+        Named, not numeric. The two CronJobs declare no ports, so a named targetPort
+        cannot resolve against them even if a selector ever widened to match their pods --
+        a numeric one would silently black-hole traffic instead.
+      */}}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "fathom-eval.serveSelectorLabels" . | nindent 4 }}
+{{- end }}

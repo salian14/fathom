@@ -45,6 +45,40 @@ app.kubernetes.io/name: {{ include "fathom-eval.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/*
+The read service. A separate name, separate labels and a separate ServiceAccount from the
+harness, because it is a different thing with different privileges: the harness writes to
+the cluster, this reads a file.
+*/}}
+{{- define "fathom-eval.serveFullname" -}}
+{{- printf "%s-serve" (include "fathom-eval.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+Component labels. Until the read service existed, every pod in this namespace carried
+exactly `selectorLabels` and nothing else -- which was fine while they were all Jobs that
+came and went. A long-running Deployment sharing those labels would be selected by any
+Service built on them, and would make `make run-now`'s "is a run in flight?" guard true
+forever. So all three workloads now say which one they are.
+*/}}
+{{- define "fathom-eval.serveSelectorLabels" -}}
+{{ include "fathom-eval.selectorLabels" . }}
+app.kubernetes.io/component: serve
+{{- end -}}
+
+{{- define "fathom-eval.serveLabels" -}}
+{{ include "fathom-eval.labels" . }}
+app.kubernetes.io/component: serve
+{{- end -}}
+
+{{- define "fathom-eval.serveServiceAccountName" -}}
+{{- if .Values.serve.serviceAccount.create -}}
+{{- default (include "fathom-eval.serveFullname" .) .Values.serve.serviceAccount.name -}}
+{{- else -}}
+{{- default "default" .Values.serve.serviceAccount.name -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "fathom-eval.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
 {{- default (include "fathom-eval.fullname" .) .Values.serviceAccount.name -}}

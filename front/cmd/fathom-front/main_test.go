@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -73,5 +75,132 @@ func TestNotReadyWhenAgentIsAbsent(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "agent unreachable") {
 		t.Errorf("body = %q, want it to name the agent", rec.Body.String())
+	}
+}
+
+// --- the mux, and the eval gate ---------------------------------------------
+
+func stubHandler(hit *int) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		*hit++
+		w.WriteHeader(http.StatusOK)
+	})
+}
+
+func muxFor(t *testing.T, evalURL string, eval http.Handler) http.Handler {
+	t.Helper()
+	cfg := testConfig("http://127.0.0.1:1")
+	cfg.EvalURL = evalURL
+	return newMux(cfg, handlers{
+		chat: stubHandler(new(int)),
+		eval: eval,
+		ui:   http.NotFoundHandler(),
+	}, quietLog())
+}
+
+// TestReadyzDoesNotDependOnEval encodes an operational decision, not a detail.
+//
+// /readyz gates this pod's membership of its Service. If the eval read view
+// being down took fathom-front out of the Service, an unavailable *inspection*
+// page would take the *chat* offline with it. The eval view reports its own
+// failures, in its own pane.
+func TestReadyzDoesNotDependOnEval(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "ok")
+	}))
+	defer agent.Close()
+
+	cfg := testConfig(agent.URL)
+	cfg.EvalURL = "http://127.0.0.1:1" // nothing is listening there
+	var hit int
+	mux := newMux(cfg, handlers{chat: stubHandler(&hit), eval: stubHandler(&hit), ui: http.NotFoundHandler()}, quietLog())
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/readyz = %d with eval unreachable, want 200: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestEvalRouteAbsentWhenDisabled(t *testing.T) {
+	mux := muxFor(t, "", nil)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/eval/runs", nil))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("/api/eval/runs = %d with eval disabled, want 404", rec.Code)
+	}
+	// It must really be absent, not a proxy failing: a registered route that
+	// errors would return the {"error": ...} envelope instead.
+	if strings.Contains(rec.Body.String(), `"error"`) {
+		t.Errorf("body = %q, want the file server's 404 rather than a proxy error", rec.Body)
+	}
+}
+
+func TestEvalRouteProxiesWhenEnabled(t *testing.T) {
+	var hit int
+	mux := muxFor(t, "http://eval.invalid:8080", stubHandler(&hit))
+
+	for _, path := range []string{"/api/eval/runs", "/api/eval/runs/12", "/api/eval/results/941"} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s = %d, want 200", path, rec.Code)
+		}
+	}
+	if hit != 3 {
+		t.Errorf("eval handler hit %d times, want 3", hit)
+	}
+}
+
+func TestFeaturesReportsTheGate(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		evalURL string
+		want    bool
+	}{
+		{"disabled", "", false},
+		{"enabled", "http://eval.invalid:8080", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var hit int
+			var eval http.Handler
+			if tt.want {
+				eval = stubHandler(&hit)
+			}
+			mux := muxFor(t, tt.evalURL, eval)
+
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/features", nil))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("/api/features = %d, want 200", rec.Code)
+			}
+			var got map[string]bool
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("unmarshal %q: %v", rec.Body, err)
+			}
+			if got["eval"] != tt.want {
+				t.Errorf("features.eval = %v, want %v", got["eval"], tt.want)
+			}
+		})
+	}
+}
+
+func TestSpanPathCollapsesIds(t *testing.T) {
+	// Without this, one span name per result ever viewed.
+	for _, tt := range []struct{ in, want string }{
+		{"/api/eval/results/941", "/api/eval/results/{id}"},
+		{"/api/eval/runs/12", "/api/eval/runs/{id}"},
+		{"/api/eval/runs", "/api/eval/runs"},
+		{"/api/chat", "/api/chat"},
+		{"/", "/"},
+	} {
+		if got := spanPath(tt.in); got != tt.want {
+			t.Errorf("spanPath(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }

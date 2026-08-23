@@ -10,7 +10,9 @@ the wiring around the model, not the model."* Without this component, a system-p
 edit, a model swap or an MCP tool-description change can make the agent worse and
 nothing notices.
 
-Reporting is deliberately not here. This ends at a queryable database.
+Reporting is deliberately not here. This ends at a queryable database — and, since
+nothing outside this namespace can mount the volume that database lives on, at a
+read-only HTTP view of it. `fathom-front` does the rendering; see *The read service*.
 
 ---
 
@@ -115,6 +117,7 @@ short-circuits at the ceiling and answers with the literal string
 | `no_answer` | 200 and the answer is one of the agent's own fallbacks |
 | `timeout` | 504 |
 | `error` | 502 / 400 / 422 |
+| `fixture_error` | the fixture never became ready, so nothing was asked at all |
 
 Only `ok` is graded further — a timed-out turn has no answer worth checking, and emitting
 naming and content failures for it would bury the real defect under derived ones.
@@ -305,6 +308,58 @@ The PVC is node-pinned by `local-path` (`WaitForFirstConsumer`), which is self-c
 — the PV's node affinity pulls later Jobs to the same node — but it does mean the history
 lives on one node's disk. The claim carries `helm.sh/resource-policy: keep`, so
 `helm uninstall` will not take it with it.
+
+## The read service
+
+SQLite is a library, not a server: `results.db` is readable only by a process that has
+the volume mounted. `fathom-front` is in the `fathom` namespace and a PVC cannot be
+mounted across namespaces, so something in *this* namespace has to give the file a
+server. That is `fathom-eval serve` — the same image and the same `FATHOM_EVAL_DB_PATH`
+as the two CronJobs, running as a Deployment.
+
+```
+GET /healthz                  the process is up
+GET /readyz                   /data is mounted and readable
+GET /meta                     schema version, file size and mtime
+GET /runs?limit=&offset=      the run list, with per-run outcome and judge aggregates
+GET /runs/{id}                one run: per-fixture, per-check and per-rubric aggregates
+GET /results/{id}             one result: answer, remediation, tool trace, checks, judge
+```
+
+Four properties worth knowing before changing it:
+
+- **A missing database is a 200, not an error.** A cluster whose CronJob has never run is
+  a correct state and renders as an empty view. `/readyz` therefore reports on the
+  *mount* — an absent `/data` is a deploy fault worth failing on, an absent `results.db`
+  is not. The connection is opened per request, so the view starts working the moment the
+  first run lands, with no restart.
+- **It cannot write.** `reporting.connect_ro` opens `mode=ro` with `PRAGMA query_only`,
+  and refuses to create the file rather than conjuring an empty database that would shadow
+  the harness's. Its ServiceAccount has no token and no RBAC.
+- **The volume is mounted read-write anyway, and that is not an oversight.** The database
+  is WAL, and a read-only open may have to create the `-shm` index, which needs write
+  permission on the *directory*. A run SIGKILLed at `activeDeadlineSeconds` leaves a
+  `-wal` with no `-shm`, and on a read-only mount every open mode then fails on an
+  otherwise healthy database. The read-only property lives in the connection, where it is
+  tested.
+- **Lists carry no free text.** A run is ~200 results and an answer is kilobytes, so
+  `answer`, `question_text` and `rationale` appear only in `/results/{id}`. The judge's
+  `raw_json` is never served at all — `rationale` is the parsed form of it.
+
+**It is ClusterIP, and should stay that way.** The API is unauthenticated and returns
+`results.answer` verbatim — whatever the model read out of the cluster. When the
+`secret-bait` fixture's leak check *fails*, the planted canary is in that column. Showing
+it is the entire point of that fixture; putting it on the node network is not.
+
+Locally, against a database pulled out of the cluster:
+
+```sh
+make -C eval db-pull
+make -C eval run-serve LOCAL_DB=./results.db     # :8083
+curl -s localhost:8083/runs | jq
+```
+
+Set `serve.enabled: false` to install the harness without it.
 
 ## Write access
 

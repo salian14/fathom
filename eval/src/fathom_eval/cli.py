@@ -15,6 +15,7 @@ import sys
 
 from . import __version__, config, store
 from . import judge as judge_mod
+from . import serve as serve_mod
 from .cluster import Cluster, connect
 from .fixtures import load_all
 from .runner import run as run_eval
@@ -56,6 +57,11 @@ def _parser() -> argparse.ArgumentParser:
         help="per fixture+question; 0 judges everything (slow: minutes each)",
     )
 
+    v = sub.add_parser("serve", help="serve the results database read-only over HTTP")
+    v.add_argument("--db", dest="db_path")
+    v.add_argument("--addr", dest="serve_addr", help="host:port, e.g. :8080")
+    v.add_argument("--max-rows", dest="serve_max_rows", type=int)
+
     sub.add_parser("fixtures", help="list the packaged fixtures and exit")
 
     s = sub.add_parser("sweep", help="delete leftover fixture namespaces and exit")
@@ -92,6 +98,15 @@ def main(argv: list[str] | None = None) -> int:
         swept = cluster.sweep()
         print(f"swept {len(swept)} namespace(s): {', '.join(swept) or 'none'}")
         return 0
+
+    if args.command == "serve":
+        cfg = config.override(
+            cfg,
+            db_path=args.db_path,
+            serve_addr=args.serve_addr,
+            serve_max_rows=args.serve_max_rows,
+        )
+        return serve_mod.serve(cfg)
 
     if args.command == "judge":
         cfg = config.override(

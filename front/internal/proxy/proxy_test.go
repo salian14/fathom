@@ -184,3 +184,128 @@ func TestNewRejectsBadTarget(t *testing.T) {
 		t.Error("New() accepted an unparseable target")
 	}
 }
+
+// The tests below cover the second shape this package serves: a GET subtree with
+// query parameters, for /api/eval. Everything above pins the chat shape, and the
+// point of the Options zero value is that those tests did not have to change.
+
+func TestDefaultsToPostOnly(t *testing.T) {
+	// Guards the *intent* of TestRejectsNonPost against a future default flip:
+	// an Options with nothing set must still be the chat shape.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxy(t, upstream.URL+"/chat")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/chat", nil))
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET on a default proxy: got %d, want 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != "POST" {
+		t.Errorf("Allow = %q, want POST", got)
+	}
+}
+
+func TestPrefixIsStripped(t *testing.T) {
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxy(t, upstream.URL, func(o *Options) {
+		o.StripPrefix = "/api/eval"
+		o.Methods = []string{http.MethodGet}
+	})
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/eval/runs/7", nil))
+
+	if gotPath != "/runs/7" {
+		t.Errorf("upstream path = %q, want /runs/7", gotPath)
+	}
+}
+
+func TestQueryIsForwardedOnlyWhenAsked(t *testing.T) {
+	var gotQuery string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	t.Run("chat still drops it", func(t *testing.T) {
+		// Guards the comment in Rewrite: /chat takes no parameters, and
+		// forwarding one would be a silent way to reach whatever it grows later.
+		p := newTestProxy(t, upstream.URL+"/chat")
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/chat?debug=1", nil))
+		if gotQuery != "" {
+			t.Errorf("query = %q, want it dropped", gotQuery)
+		}
+	})
+
+	t.Run("eval forwards it", func(t *testing.T) {
+		p := newTestProxy(t, upstream.URL, func(o *Options) {
+			o.StripPrefix = "/api/eval"
+			o.Methods = []string{http.MethodGet}
+			o.PassQuery = true
+		})
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/eval/runs?limit=5", nil))
+		if gotQuery != "limit=5" {
+			t.Errorf("query = %q, want limit=5", gotQuery)
+		}
+	})
+}
+
+func TestRejectsPathOutsideThePrefix(t *testing.T) {
+	var reached int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	p := newTestProxy(t, upstream.URL, func(o *Options) {
+		o.StripPrefix = "/api/eval"
+		o.Methods = []string{http.MethodGet}
+	})
+
+	for _, path := range []string{"/api/other/runs", "/api/eval/../../secret"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "http://example.test", nil)
+		req.URL.Path = path // set directly: NewRequest would clean the traversal away
+		p.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: got %d, want 400", path, rec.Code)
+		}
+	}
+	// The assertion that matters: a refused path must never have been forwarded.
+	if reached != 0 {
+		t.Errorf("upstream was reached %d times; it must never be", reached)
+	}
+}
+
+func TestServiceNameAppearsInFailures(t *testing.T) {
+	p := newTestProxy(t, "http://127.0.0.1:1", func(o *Options) {
+		o.StripPrefix = "/api/eval"
+		o.Methods = []string{http.MethodGet}
+		o.Name = "eval service"
+	})
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/eval/runs", nil))
+
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// "agent unreachable" would be a lie on this hop.
+	if !strings.Contains(body["error"], "eval service unreachable") {
+		t.Errorf("error = %q, want it to name the eval service", body["error"])
+	}
+}

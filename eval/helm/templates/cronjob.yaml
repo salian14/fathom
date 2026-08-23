@@ -33,6 +33,13 @@ spec:
         metadata:
           labels:
             {{- include "fathom-eval.selectorLabels" . | nindent 12 }}
+            {{- /*
+              Which workload this is. Every pod here used to carry only selectorLabels,
+              which was fine while they were all Jobs; the long-running read service
+              would otherwise be indistinguishable from a run in flight -- see the
+              selectors in eval/Makefile.
+            */}}
+            app.kubernetes.io/component: run
             {{- with .Values.podLabels }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
