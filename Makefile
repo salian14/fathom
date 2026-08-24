@@ -99,14 +99,17 @@ help:
 	@echo "  make release VERSION=1.4.2            pin an exact version instead of bumping"
 	@echo
 	@echo "  make version                          show the current and next version"
-	@echo "  make check                            run every component check"
+	@echo "  make check                            run every component check, then contracts-check"
+	@echo "  make contracts                        regenerate contracts/ from the components themselves"
+	@echo "  make contracts-check                  fail if contracts/ has drifted from the code"
+	@echo "  make hooks                            install the checked-in git hooks (.githooks)"
 	@echo "  make bump BUMP=patch                  rewrite the version files, then commit and tag them"
 	@echo "  make push  BUMP=patch                 build and push every image only"
 	@echo "  make deploy                           helm upgrade every chart -- each waits on the last"
 	@echo "  make render                           render every chart at the next version"
 	@echo "  make clean                            clean every component"
 	@echo
-	@echo "Knobs:  ALLOW_DIRTY=1  SKIP_CHECK=1  NO_COMMIT=1  NO_TAG=1"
+	@echo "Knobs:  ALLOW_DIRTY=1  SKIP_CHECK=1  NO_COMMIT=1  NO_TAG=1  COMPONENT=<name>"
 	@echo "        HELM_NAMESPACE=<ns>  HELM_FLAGS='...'  FATHOM_NS=<ns>  EVAL_NS=<ns>"
 	@echo "        ROLLOUT_TIMEOUT=5m"
 	@echo
@@ -140,12 +143,88 @@ preflight:
 	@echo "==> releasing $(CURRENT) -> $(NEXT) ($(COMPONENTS))"
 
 .PHONY: check
-check:
+check: contracts-check
 	@if [ -n "$(SKIP_CHECK)" ]; then echo "==> skipping component checks (SKIP_CHECK set)"; else \
 	  for c in $(COMPONENTS); do \
 	    echo "==> check: $$c"; $(MAKE) --no-print-directory -C $$c check || exit 1; \
 	  done; \
 	fi
+
+# --- contracts ---------------------------------------------------------------
+#
+# contracts/ is generated, never edited -- and nothing in any component exists to
+# generate it. The writer builds each component's image, starts it in a throwaway
+# container configured the way its own chart configures it, and scrapes it over the
+# wire: FastAPI's own /openapi.json for the agent, a real tools/list for mcp, the
+# applied SQLite schema for eval. It merges in the facts only the chart knows --
+# namespace, Service type, nodePort, RBAC, probes.
+#
+# The container run is also the port check: it dials the chart's own containerPort,
+# so a pod that would start, pass its probes and be unreachable through its Service
+# fails here instead.
+#
+# This needs Docker, because it runs the services -- with one carve-out. FastAPI
+# publishes /openapi.json itself, so `make contracts` can serve agent and eval from
+# their own venvs when no daemon is there and still produce the identical document;
+# `mcp`'s tool surface and the two port checks need a container and are left alone.
+# `contracts-check` deliberately does not take that path: it is the drift gate inside
+# `make check`, and a gate that silently checks less than it claims is worse than one
+# that refuses.
+#
+# The writer needs PyYAML, httpx and the MCP SDK. agent's venv carries all three
+# already, so it is used and built only if it does not exist.
+CONTRACT_PY := $(wildcard agent/.venv/bin/python)
+
+.PHONY: contract-venv
+contract-venv:
+	@if [ -z "$(CONTRACT_PY)" ]; then \
+	  echo "==> no agent venv yet; building it for PyYAML, httpx and the MCP SDK"; \
+	  $(MAKE) --no-print-directory -C agent venv; \
+	fi
+
+.PHONY: contracts
+contracts: contract-venv
+	@py="$(CONTRACT_PY)"; [ -n "$$py" ] || py=agent/.venv/bin/python; \
+	$$py scripts/contracts.py --allow-offline $(COMPONENT)
+
+# Regenerates into a temp tree and diffs, so a drifted contract is reported
+# without being silently repaired -- `make contracts` is how you repair it.
+# The two hand-written things are excluded: integration-notes.md, which the writer
+# only ever creates and never rewrites, and contracts/README.md. Neither exists in
+# a freshly generated tree, and neither absence is drift.
+.PHONY: contracts-check
+contracts-check: contract-venv
+	@py="$(CONTRACT_PY)"; [ -n "$$py" ] || py=agent/.venv/bin/python; \
+	tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
+	$$py scripts/contracts.py --out "$$tmp" $(COMPONENT) || exit 1; \
+	scope="$(COMPONENT)"; rc=0; : >"$$tmp.diff"; \
+	if [ -n "$$scope" ]; then \
+	  for c in $$scope; do \
+	    diff -r -x integration-notes.md -x README.md "contracts/$$c" "$$tmp/$$c" >>"$$tmp.diff" 2>&1 || rc=1; \
+	  done; \
+	else \
+	  diff -r -x integration-notes.md -x README.md contracts "$$tmp" >>"$$tmp.diff" 2>&1 || rc=1; \
+	fi; \
+	if [ $$rc -eq 0 ]; then \
+	  echo "==> contracts up to date"; \
+	else \
+	  echo "==> contracts have drifted from the code:"; cat "$$tmp.diff"; \
+	  echo; echo "Run 'make contracts' and commit the result."; \
+	  rm -f "$$tmp.diff"; exit 1; \
+	fi; \
+	rm -f "$$tmp.diff"
+
+# Opt in to the checked-in hooks. Separate from anything that runs on its own:
+# pointing core.hooksPath at a directory in the repo means a `git pull` can change
+# what runs on your machine at commit time, and that is a decision to take
+# knowingly rather than a side effect of running a build.
+.PHONY: hooks
+hooks:
+	@git config core.hooksPath .githooks
+	@echo "core.hooksPath = .githooks"
+	@echo "pre-commit will regenerate contracts/ for the components a commit touches."
+	@echo "Bypass once with 'git commit --no-verify', or always with FATHOM_SKIP_CONTRACTS=1."
+	@echo "Undo with 'git config --unset core.hooksPath'."
 
 # Chart version and appVersion move together: appVersion is what the Deployment
 # reads for its image tag, and a chart whose own version did not change will not

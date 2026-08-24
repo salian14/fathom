@@ -321,3 +321,60 @@ def test_truncate_drops_the_partial_first_line():
     out = mcp_client.truncate("aaaaaaaaaa\nbbbb\ncccc", 60)
 
     assert "aaaa" not in out.split("\n", 1)[1]
+
+
+# --- the published contract -----------------------------------------------------
+
+
+def test_chat_response_model_drops_nothing(client, monkeypatch):
+    """A response_model filters the body it serialises, so it can silently delete a
+    field the UI or the eval harness reads. That failure is invisible in the spec --
+    the spec would simply stop mentioning it -- so it is pinned here instead."""
+
+    class FakeGraph:
+        async def ainvoke(self, state, config):
+            return {
+                "messages": [
+                    AIMessage(
+                        "",
+                        tool_calls=[{"name": "k8s_log", "args": {"name": "p"}, "id": "1"}],
+                    ),
+                    ToolMessage("boom", tool_call_id="1"),
+                    AIMessage("The pod is crash-looping."),
+                ]
+            }
+
+    monkeypatch.setattr(api, "build_graph", lambda cfg, model, tools: FakeGraph())
+    monkeypatch.setattr(api, "tool_session", _fake_session)
+    _stub_shaper(client, {"action_required": True, "summary": "restart it", "confidence": "low"})
+
+    body = client.post("/chat", json={"question": "why?"}).json()
+
+    assert set(body) == {
+        "answer",
+        "remediation",
+        "remediation_error",
+        "steps",
+        "iterations",
+        "model",
+        "elapsed_seconds",
+    }
+    # The remediation passes through as the shaper produced it -- the schema is
+    # REMEDIATION_SCHEMA, not a Pydantic restatement that could narrow it.
+    assert body["remediation"]["summary"] == "restart it"
+    assert set(body["steps"][0]) == {"tool", "args", "result_chars", "status"}
+
+
+def test_the_openapi_spec_describes_every_route():
+    """`contracts/agent/openapi.json` is scraped from a running container's
+    `/openapi.json`, so an undocumented route is an absence in the published
+    contract rather than a visible bug. This asserts the shape the scraper
+    depends on, without a second copy of it anywhere in the service."""
+    spec = api.create_app(load()).openapi()
+
+    assert sorted(spec["paths"]) == ["/chat", "/healthz", "/readyz"]
+    # A body schema, not a bare 200. This is the gap response_model closed.
+    ok = spec["paths"]["/chat"]["post"]["responses"]["200"]
+    assert ok["content"]["application/json"]["schema"]["$ref"].endswith("/ChatResponse")
+    # Every failure a caller has to handle is declared.
+    assert {"400", "422", "502", "504"} <= set(spec["paths"]["/chat"]["post"]["responses"])

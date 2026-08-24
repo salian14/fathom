@@ -9,19 +9,27 @@ dependencies = [
     "httpx==0.28.1",
     "kubernetes==36.0.3",
     "PyYAML==6.0.3",
-    # `serve` needs an HTTP server. aiohttp is already in the tree -- the kubernetes
-    # client pulls it -- so this promotes a transitive dependency to a direct one
-    # rather than adding a wheel. Declaring it is not optional: depending on something
-    # only because another package happens to want it is how a working build breaks on
-    # an unrelated upgrade. FastAPI was the alternative and would have added starlette,
-    # uvicorn and pydantic to a batch image for six read-only routes.
-    "aiohttp==3.14.3",
+    # `serve` needs an HTTP server. This was aiohttp until 2026-08-23, chosen because
+    # the kubernetes client already pulls it and FastAPI would add starlette, uvicorn
+    # and pydantic to a batch image for six read-only routes.
+    #
+    # Reversed deliberately. That reasoning was right about image weight and wrong about
+    # what `serve` is: it is the only pure JSON API in the repo, its responses cross a
+    # namespace boundary into front/internal/web/static/evals.js, and aiohttp publishes
+    # no machine-readable description of any of it. FastAPI serves its own
+    # /openapi.json, which scripts/contracts.py scrapes from a running container exactly
+    # as it does for fathom-agent -- so contracts/eval/openapi.json costs this component
+    # no describe-myself code, which is the constraint contracts/ is built around. Three
+    # wheels is the price of the response contract being generated instead of prose.
+    # Pinned to the same versions agent/pyproject.toml carries -- one FastAPI in the repo.
+    "fastapi==0.141.1",
+    "uvicorn==0.52.3",
     # Telemetry, matching the other components. Traces only -- `run` and `judge` are
-    # batch jobs and a metric stream from them means nothing. The aiohttp-server
-    # instrumentation is the one server-shaped piece: `serve` is a long-running inbound
-    # boundary, and the repo's rule is to instrument a boundary with the auto
-    # instrumentation rather than hand-rolled spans.
-    "opentelemetry-instrumentation-aiohttp-server==0.65b0",
+    # batch jobs and a metric stream from them means nothing. The FastAPI instrumentation
+    # is the one server-shaped piece: `serve` is a long-running inbound boundary, and the
+    # repo's rule is to instrument a boundary with the auto instrumentation rather than
+    # hand-rolled spans. Same call fathom-agent makes, same excluded_urls.
+    "opentelemetry-instrumentation-fastapi==0.65b0",
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-grpc==1.44.0",
     "opentelemetry-instrumentation-httpx==0.65b0",

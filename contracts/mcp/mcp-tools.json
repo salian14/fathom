@@ -1,0 +1,230 @@
+{
+  "layout_version": 2,
+  "note": "Scraped from a real tools/list against a running container, once with prometheus.url unset and once with the chart's value. Tools marked gated are absent from tools/list on an install without a URL.",
+  "protocol": {
+    "instructions": {
+      "with_prometheus": "Read-only access to a Kubernetes cluster. Survey with k8s_get, diagnose a specific object with k8s_describe, and read container output with k8s_log. For how the cluster is behaving over time rather than how it is configured, use list_metrics to find a metric, describe_metric to learn its labels, then run_promql to query it. Nothing here can change the cluster.",
+      "without_prometheus": "Read-only access to a Kubernetes cluster. Survey with k8s_get, diagnose a specific object with k8s_describe, and read container output with k8s_log. Nothing here can change the cluster."
+    },
+    "kind": "mcp",
+    "path": "/mcp",
+    "transport": "streamable-http"
+  },
+  "tools": [
+    {
+      "annotations": {
+        "idempotentHint": false,
+        "readOnlyHint": true,
+        "title": "Describe a Prometheus metric"
+      },
+      "description": "Describe one metric: its type, help text and unit, how many series it has, and the label names and values available on it. Call this before writing a query -- it is what tells you which labels exist to filter or aggregate by, so you do not have to guess. Read-only.",
+      "gated_on": "prometheus.url",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "match": {
+            "description": "Extra label matchers to narrow which series are inspected, e.g. \"namespace=\\\"fathom\\\"\". Braces are optional.",
+            "type": "string"
+          },
+          "metric": {
+            "description": "Name of the metric to describe, e.g. \"container_memory_working_set_bytes\". Required. Use list_metrics to find one.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "metric"
+        ],
+        "type": "object"
+      },
+      "name": "describe_metric"
+    },
+    {
+      "annotations": {
+        "idempotentHint": false,
+        "readOnlyHint": true,
+        "title": "Describe a Kubernetes object"
+      },
+      "description": "Describe one Kubernetes object in the same human-readable form as 'kubectl describe', including its recent events. Use this to diagnose why something is unhealthy: events explain pending, crash-looping and failed-mount states that the object's YAML alone does not. Read-only.",
+      "gated_on": null,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "description": "Name of the object to describe. Required.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Namespace of the object. Omit for the default namespace; ignored for cluster-scoped resources.",
+            "type": "string"
+          },
+          "resource": {
+            "description": "Resource type of the object, e.g. \"pods\", \"nodes\", \"deployments.apps\".",
+            "type": "string"
+          },
+          "showEvents": {
+            "description": "Include the object's recent events. Defaults to true; events are usually the reason to describe something.",
+            "type": [
+              "null",
+              "boolean"
+            ]
+          }
+        },
+        "required": [
+          "resource",
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "k8s_describe"
+    },
+    {
+      "annotations": {
+        "idempotentHint": false,
+        "readOnlyHint": true,
+        "title": "Get Kubernetes objects"
+      },
+      "description": "List or fetch Kubernetes objects. Without 'name' it returns a kubectl-style table of matching objects, which is the cheap way to survey a namespace. With 'name' it returns that single object as YAML. Read-only.",
+      "gated_on": null,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "allNamespaces": {
+            "description": "List across every namespace. Only valid when listing (no name).",
+            "type": "boolean"
+          },
+          "fieldSelector": {
+            "description": "Field selector, e.g. \"status.phase=Running\".",
+            "type": "string"
+          },
+          "labelSelector": {
+            "description": "Label selector, e.g. \"app=nginx,tier!=cache\".",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Maximum number of objects to list. Bounded by the server's own limit.",
+            "type": "integer"
+          },
+          "name": {
+            "description": "Name of a single object. Omit to list. With a name, the full object is returned as YAML; without one, a summary table is returned.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Namespace to read from. Omit for the default namespace; ignored for cluster-scoped resources like nodes.",
+            "type": "string"
+          },
+          "resource": {
+            "description": "Resource type to read, e.g. \"pods\", \"nodes\", \"deployments.apps\". Singular, plural and short names all work.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "resource"
+        ],
+        "type": "object"
+      },
+      "name": "k8s_get"
+    },
+    {
+      "annotations": {
+        "idempotentHint": false,
+        "readOnlyHint": true,
+        "title": "Read pod logs"
+      },
+      "description": "Read the tail of a container's log from a pod. Output is bounded, so the most recent lines are returned and older ones are dropped. Set 'previous' to read the log of the last terminated container after a restart. Read-only.",
+      "gated_on": null,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "container": {
+            "description": "Container to read from. Required only when the pod has more than one container.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Name of the pod. Required.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Namespace of the pod. Omit for the default namespace.",
+            "type": "string"
+          },
+          "previous": {
+            "description": "Read the log of the previous, terminated instance of the container. Use this after a restart or crash loop, when the current log is empty or has started over.",
+            "type": "boolean"
+          },
+          "sinceSeconds": {
+            "description": "Only return lines newer than this many seconds ago.",
+            "type": "integer"
+          },
+          "tailLines": {
+            "description": "How many lines from the end of the log to read. Bounded by the server's own limit.",
+            "type": "integer"
+          },
+          "timestamps": {
+            "description": "Prefix every line with its RFC3339 timestamp.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "k8s_log"
+    },
+    {
+      "annotations": {
+        "idempotentHint": false,
+        "readOnlyHint": true,
+        "title": "List Prometheus metrics"
+      },
+      "description": "List the metric names Prometheus is collecting. This is the cheap way to find out what is measurable before querying anything. Filter with 'contains' to search by substring, or 'match' to restrict to series matching a selector. Read-only.",
+      "gated_on": "prometheus.url",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "contains": {
+            "description": "Only return metric names containing this substring, e.g. \"memory\". Case-insensitive.",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Maximum number of metric names to return. Bounded by the server's own limit.",
+            "type": "integer"
+          },
+          "match": {
+            "description": "Restrict to metrics whose series match this PromQL selector, e.g. \"{job=\\\"kubelet\\\"}\". Omit to consider every series.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "list_metrics"
+    },
+    {
+      "annotations": {
+        "idempotentHint": false,
+        "readOnlyHint": true,
+        "title": "Run a PromQL query"
+      },
+      "description": "Run an instant PromQL query and return the result. The query must be valid PromQL; if Prometheus rejects it, the error says where. Prefer an aggregation such as 'sum by (namespace) (...)' over selecting raw series, because the number of series returned is capped. Read-only: this cannot change anything in Prometheus or the cluster.",
+      "gated_on": "prometheus.url",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "description": "PromQL expression to evaluate, e.g. \"sum by (namespace) (kube_pod_info)\". Required. Evaluated at a single instant, so use a range only inside a function such as rate(x[5m]).",
+            "type": "string"
+          },
+          "time": {
+            "description": "Instant to evaluate at, as RFC3339, e.g. \"2026-08-17T10:00:00Z\". Omit for now.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "run_promql"
+    }
+  ]
+}

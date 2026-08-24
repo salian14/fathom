@@ -1,18 +1,17 @@
 """The read service: routes, envelopes, and the empty state.
 
-Driven through aiohttp's own test client, which ships with aiohttp -- no new dependency
-and no real socket. What is checked here is the HTTP contract the browser depends on:
-the {"error": ...} envelope, the status vocabulary, and that a database which does not
-exist yet is an empty view rather than an outage.
+Driven through FastAPI's own test client -- no new dependency and no real socket. What
+is checked here is the HTTP contract the browser depends on: the {"error": ...}
+envelope, the status vocabulary, and that a database which does not exist yet is an
+empty view rather than an outage.
 """
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import replace
 
 import pytest
-from aiohttp.test_utils import TestClient, TestServer
+from fastapi.testclient import TestClient
 
 from fathom_eval import config, serve, store
 from fathom_eval.grading import Check
@@ -50,35 +49,19 @@ def populated(cfg):
     return cfg
 
 
-def serving(cfg, body):
-    """Run `body(client)` against a live app, in its own event loop.
-
-    Synchronous on purpose: pytest cannot collect `async def` tests without an asyncio
-    plugin, and one helper is cheaper than a new dev dependency for six lines of glue.
-    """
-
-    async def main():
-        client = TestClient(TestServer(serve.build_app(cfg)))
-        await client.start_server()
-        try:
-            return await body(client)
-        finally:
-            await client.close()
-
-    return asyncio.run(main())
-
-
 def get(cfg, path, method="GET"):
-    """One request. Returns (status, parsed-json-or-text)."""
+    """One request. Returns (status, parsed-json-or-text).
 
-    async def body(client):
-        resp = await client.request(method, path)
+    `raise_server_exceptions=False` so an exception handler is exercised as the client
+    would see it -- a sqlite3.Error has to become a 500 carrying the envelope, and a
+    test client that re-raises instead would never prove that.
+    """
+    with TestClient(serve.build_app(cfg), raise_server_exceptions=False) as client:
+        resp = client.request(method, path)
         try:
-            return resp.status, await resp.json()
+            return resp.status_code, resp.json()
         except Exception:
-            return resp.status, await resp.text()
-
-    return serving(cfg, body)
+            return resp.status_code, resp.text
 
 
 # ------------------------------------------------------------- the empty state
@@ -171,9 +154,12 @@ def test_post_is_rejected(populated):
     assert "error" in body
 
 
-def test_a_non_integer_id_is_a_400(populated):
+def test_a_non_integer_id_is_a_422(populated):
+    """422 rather than 400 since 2026-08-23: the parameter is validated by FastAPI, so
+    the published spec can declare a status that actually happens. The envelope is
+    unchanged, which is the part evals.js depends on."""
     status, body = get(populated, "/results/abc")
-    assert status == 400
+    assert status == 422
     assert "integer" in body["error"]
 
 
@@ -183,9 +169,12 @@ def test_a_missing_run_is_a_404(populated):
     assert "no run 999" in body["error"]
 
 
-def test_a_bad_limit_is_a_400(populated):
-    assert get(populated, "/runs?limit=lots")[0] == 400
-    assert get(populated, "/runs?limit=-1")[0] == 400
+def test_a_bad_limit_is_a_422(populated):
+    """Both the unparseable and the negative case, and both carry the envelope."""
+    status, body = get(populated, "/runs?limit=lots")
+    assert status == 422
+    assert "error" in body
+    assert get(populated, "/runs?limit=-1")[0] == 422
 
 
 def test_limit_is_clamped_to_max_rows(populated):
@@ -217,3 +206,73 @@ def test_a_bad_serve_addr_fails_the_same_way_as_the_env_var():
     """The CLI must not be a way around the checks -- override re-validates."""
     with pytest.raises(ValueError, match="SERVE_ADDR"):
         config.override(config.load(), serve_addr="not-an-address")
+
+
+# ------------------------------------------------------- the published contract
+
+
+def test_the_openapi_spec_describes_every_route(cfg):
+    """`contracts/eval/openapi.json` is scraped from a running container's own
+    `/openapi.json`, so an undocumented route is an absence in the published contract
+    rather than a visible bug. This asserts the shape the scraper depends on, without a
+    second copy of it anywhere in the service."""
+    spec = serve.build_app(cfg).openapi()
+
+    assert sorted(spec["paths"]) == [
+        "/healthz",
+        "/meta",
+        "/readyz",
+        "/results/{id}",
+        "/runs",
+        "/runs/{id}",
+    ]
+
+    for path in ("/runs", "/runs/{id}", "/results/{id}"):
+        responses = spec["paths"][path]["get"]["responses"]
+        # The two states a data route can answer 200 with, and the two it can fail with.
+        # 422 not 400: the parameters are FastAPI-validated, so the declared status is
+        # one that can actually occur.
+        assert "200" in responses
+        assert {"422", "503"} <= set(responses), path
+    # The empty-database state is part of the 200, not an error status.
+    runs_ok = spec["paths"]["/runs"]["get"]["responses"]["200"]
+    assert "anyOf" in runs_ok["content"]["application/json"]["schema"]
+
+
+def test_response_models_drop_nothing(populated):
+    """A response_model filters the body it serialises, so it can silently delete a
+    field `evals.js` reads. That failure is invisible in the spec -- the spec would
+    simply stop mentioning it -- so it is pinned here instead.
+
+    The row objects are `dict[str, Any]` precisely so this cannot happen inside them;
+    this proves the envelope does not narrow either.
+    """
+    from fathom_eval import reporting
+
+    conn = reporting.connect_ro(populated.db_path)
+    try:
+        expected = reporting.list_runs(conn, limit=50, offset=0)
+    finally:
+        conn.close()
+
+    status, body = get(populated, "/runs")
+
+    assert status == 200
+    assert set(body) == set(expected)
+    assert set(body["runs"][0]) == set(expected["runs"][0])
+
+    # And the detail envelope, which is the one that carries the SELECT * row.
+    status, detail = get(populated, "/runs/1")
+    assert status == 200
+    assert {
+        "run",
+        "fixtures",
+        "checks",
+        "category_order",
+        "rubric_versions",
+        "rubric",
+        "results",
+        "limit",
+        "offset",
+        "total",
+    } <= set(detail)

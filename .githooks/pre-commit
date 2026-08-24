@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+#
+# Regenerate contracts/ for the components this commit touches, and include the
+# result in the commit.
+#
+# Install with `make hooks` (sets core.hooksPath to this directory). Bypass once
+# with `git commit --no-verify`, or always with FATHOM_SKIP_CONTRACTS=1.
+#
+# Why a hook and not CI: there is no CI in this repository. Every gate here runs
+# from a Makefile when someone types it, so a commit is the only moment at which
+# a generated artifact can be held to the code it describes.
+#
+# Why it regenerates rather than refusing: a contract that lags is the failure
+# being designed out, and "run make contracts and commit again" makes every
+# interface change a two-attempt commit. The trade is that the commit contains
+# files you did not stage by hand, so every one of them is listed below.
+#
+# This is not a cheap hook. The writer runs the services rather than parsing them,
+# so it builds a container image per touched component. Docker's layer cache makes
+# the common case -- a change inside one component, no dependency change -- a few
+# seconds; a cold cache is a minute or more. Scoping to touched components is what
+# keeps that tolerable, and FATHOM_SKIP_CONTRACTS=1 is there for when it is not.
+
+set -euo pipefail
+
+if [ -n "${FATHOM_SKIP_CONTRACTS:-}" ]; then
+	echo "pre-commit: FATHOM_SKIP_CONTRACTS set, leaving contracts/ alone" >&2
+	exit 0
+fi
+
+repo="$(git rev-parse --show-toplevel)"
+cd "$repo"
+
+git_dir="$(git rev-parse --git-dir)"
+
+# A merge or a rebase is not the place to regenerate anything. The tree during a
+# conflicted merge is not a state anybody intends to publish, and rewriting
+# generated files mid-rebase turns one conflict into one per replayed commit.
+for marker in MERGE_HEAD REBASE_HEAD rebase-merge rebase-apply CHERRY_PICK_HEAD; do
+	if [ -e "$git_dir/$marker" ]; then
+		echo "pre-commit: $marker present, skipping contract regeneration" >&2
+		exit 0
+	fi
+done
+
+staged="$(git diff --cached --name-only --diff-filter=ACMR)"
+[ -n "$staged" ] || exit 0
+
+# Which components does this commit touch? Only those are regenerated: a
+# docs-only commit then costs nothing, and you only need a component's toolchain
+# on the commits that actually change it.
+components=""
+add() { case " $components " in *" $1 "*) ;; *) components="$components $1" ;; esac; }
+
+while IFS= read -r path; do
+	case "$path" in
+	agent/*) add agent ;;
+	mcp/*) add mcp ;;
+	front/*) add front ;;
+	eval/*) add eval ;;
+	# The writer, the release Makefile and the hooks themselves can change how
+	# every contract is produced, so they rebuild all four.
+	scripts/contracts.py | Makefile | .githooks/*)
+		add mcp
+		add agent
+		add front
+		add eval
+		;;
+	esac
+done <<<"$staged"
+
+[ -n "$components" ] || exit 0
+
+# The generator reads the working tree, not the index, because it runs the code
+# rather than parsing it -- there is no way to run a file that exists only in the
+# index. With unstaged changes in a component, the contract therefore describes
+# the working tree rather than what is being committed. Warned about rather than
+# stashed: `git stash --keep-index` inside a hook can lose work when anything
+# later in the hook fails, and a wrong contract is cheaper than a lost change.
+for c in $components; do
+	if ! git diff --quiet -- "$c"; then
+		echo "pre-commit: warning: $c has unstaged changes; its contract will" >&2
+		echo "            describe the working tree, not this commit." >&2
+	fi
+done
+
+# Docker being down does not stop this any more, and it does not silently pass
+# either. `make contracts` degrades: service.json comes from `helm template` and
+# never needed a daemon, and FastAPI publishes /openapi.json itself, so agent and
+# eval are served from their own venvs and scraped through the identical path. What
+# it cannot do is run a Go binary, so mcp's tool surface and the two containerPort
+# checks are skipped -- the writer names them on stderr, and `make check` at the
+# root still runs contracts-check, which is where a contract left stale is caught.
+#
+# Blocking every commit in the repository on the daemon being up -- including the
+# docs-only ones that reach this line because they touched a component directory --
+# trains people into --no-verify, which disables the hook for everything rather
+# than for this.
+if ! docker info >/dev/null 2>&1; then
+	echo "pre-commit: Docker is not available. agent and eval will be scraped from" >&2
+	echo "            their venvs; anything needing a running binary is left as it" >&2
+	echo "            is. Run 'make contracts' once Docker is up to close the gap." >&2
+fi
+
+echo "pre-commit: regenerating contracts for:$components" >&2
+
+# Deliberately fails the commit rather than skipping. Elsewhere in this repo a
+# missing tool is a clean skip -- lint-chart without helm, test-ui without node --
+# but those targets check something, while this one produces something. A skip
+# here commits a stale contract, which is exactly the failure the hook exists to
+# prevent. Scoping to touched components is what keeps that from being a burden.
+#
+# The offline path has one more way to produce nothing -- a component whose venv has
+# not been built. That is a named skip like the others, not a failure: `make -C
+# <component> venv` is the fix, and it is not a thing to discover mid-commit.
+if ! make --no-print-directory contracts COMPONENT="$components" >&2; then
+	echo >&2
+	echo "pre-commit: could not regenerate contracts." >&2
+	echo "  A missing venv?   make -C agent venv" >&2
+	echo "  Container failed? the message above carries its last output." >&2
+	echo "  A real drift?     the message above names the two files that disagree." >&2
+	echo "  Not now?          git commit --no-verify" >&2
+	exit 1
+fi
+
+changed=""
+for c in $components; do
+	[ -d "contracts/$c" ] || continue
+	git add "contracts/$c"
+	while IFS= read -r f; do
+		[ -n "$f" ] && changed="$changed$f"$'\n'
+	done < <(git diff --cached --name-only -- "contracts/$c")
+done
+
+if [ -n "$changed" ]; then
+	echo "pre-commit: contracts included in this commit:" >&2
+	printf '  %s\n' $(echo "$changed" | sort -u) >&2
+fi
+
+exit 0

@@ -1,0 +1,38 @@
+{
+  "component": "agent",
+  "layout_version": 2,
+  "listen_port": 8080,
+  "namespaces": [
+    "fathom"
+  ],
+  "probes": {
+    "liveness": "/healthz",
+    "readiness": "/readyz"
+  },
+  "rbac": [],
+  "service": "fathom-agent",
+  "services": [
+    {
+      "name": "fathom-agent",
+      "namespace": "fathom",
+      "node_port": 30080,
+      "port": 8080,
+      "protocol": "TCP",
+      "target_port": "http",
+      "type": "NodePort"
+    }
+  ],
+  "version": "0.5.4",
+  "workloads": [
+    {
+      "container_ports": [
+        8080
+      ],
+      "images": [
+        "registry.lab:5000/fathom-agent:0.5.4"
+      ],
+      "kind": "Deployment",
+      "name": "fathom-agent"
+    }
+  ]
+}

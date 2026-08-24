@@ -333,3 +333,27 @@ carries a `checksum/config` annotation over those blocks.
 Note that `make release` at the repository root does all of this for all four components at
 one version; this chart is wired into it as `deploy-front`, rolled last because its readiness
 depends on the agent's.
+
+## The published contract
+
+`contracts/front/` describes this service's interface, and is **generated** — never
+edit it.
+
+There is **no generated spec for this component**, and that is the honest answer: Go's
+`http.ServeMux` does not report what was registered with it. The route table lives in
+`contracts/front/integration-notes.md`, written by hand and pinned by
+`TestDocumentedRoutesAreServed`, which dials every documented row through the real mux.
+Change `newMux` and the notes together or that test fails.
+
+The chart supplies what a process cannot know about itself — namespace, Service type,
+nodePort, RBAC, probes. The sandbox runs the container with the chart's own environment
+and dials its `containerPort`, so a pod that would start, pass its probes and be
+unreachable through its Service fails here instead.
+
+```sh
+make -C .. contracts COMPONENT=front   # needs Docker: this runs the service
+make -C .. contracts-check              # fail on drift; also part of the root `make check`
+```
+
+`make -C .. hooks` installs the pre-commit hook that regenerates it for you.
+`contracts/front/integration-notes.md` is the one file in there written by hand.

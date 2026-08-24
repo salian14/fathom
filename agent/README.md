@@ -395,3 +395,25 @@ helm uninstall fathom-agent
 
 Changes to `agent.*`, `ollama.*`, `mcp.*` or `otel.*` roll the pods automatically —
 the Deployment carries a `checksum/config` annotation over those blocks.
+
+## The published contract
+
+`contracts/agent/` describes this service's interface, and is **generated** — never
+edit it.
+
+`scripts/contracts.py` starts this component's image in a throwaway container
+and fetches FastAPI's own `/openapi.json` from it. **Nothing in this service exists to
+produce that** — no `contract` target, no describe-myself module.
+
+The chart supplies what a process cannot know about itself — namespace, Service type,
+nodePort, RBAC, probes. The sandbox runs the container with the chart's own environment
+and dials its `containerPort`, so a pod that would start, pass its probes and be
+unreachable through its Service fails here instead.
+
+```sh
+make -C .. contracts COMPONENT=agent   # runs the service; without Docker, from .venv
+make -C .. contracts-check              # fail on drift; also part of the root `make check`
+```
+
+`make -C .. hooks` installs the pre-commit hook that regenerates it for you.
+`contracts/agent/integration-notes.md` is the one file in there written by hand.

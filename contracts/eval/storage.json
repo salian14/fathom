@@ -1,0 +1,6 @@
+{
+  "engine": "sqlite",
+  "layout_version": 2,
+  "path": "/data/results.db",
+  "schema_version": 2
+}

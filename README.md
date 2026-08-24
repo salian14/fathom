@@ -141,7 +141,7 @@ rather than a server and `fathom-front` cannot mount the volume from another nam
 |---|---|
 | Language | Python 3.12 |
 | Owns | the fixtures, the rubrics, the judge, and `results.db` |
-| Built on | `httpx`, `aiohttp` (the read service), SQLite |
+| Built on | `httpx`, FastAPI + `uvicorn` (the read service), SQLite |
 | K8s credentials | **yes, and the only *write* ones in the repo** — namespaces, bare Pods, Services, ConfigMaps; `secrets` create/delete without read |
 | Conversation state | none — every question is a fresh `/chat` |
 | Reached at | CronJobs, on a schedule and suspended by default; `fathom-eval-serve` on ClusterIP `:8080`, never a NodePort |
@@ -292,6 +292,9 @@ mcp/            Go MCP server — cmd/, internal/, Dockerfile, helm/
 front/          Go chat + eval UI — cmd/, internal/ (assets embedded), Dockerfile, helm/
 eval/           Python eval harness — src/fathom_eval/ (fixtures + rubrics packaged), helm/
 ollama/         host-side setup — config.env (every knob) + setup.sh (applies them)
+contracts/      GENERATED — what each service publishes. Never edit; `make contracts`
+scripts/        contracts.py, the writer behind `make contracts`
+.githooks/      the opt-in pre-commit hook; install with `make hooks`
 Makefile        cuts one version across all four components at once
 ```
 
@@ -470,6 +473,33 @@ Knobs: `ALLOW_DIRTY=1`, `SKIP_CHECK=1`, `NO_COMMIT=1`, `NO_TAG=1`, `HELM_NAMESPA
 of any kind — every gate described above runs from a Makefile, on a workstation, when
 someone types it. A green tree means someone ran `make check`, not that anything checked
 it automatically.
+
+**One exception, and it is opt-in: a pre-commit hook.** `make hooks` points
+`core.hooksPath` at the checked-in `.githooks/`, after which committing a change to a
+component regenerates that component's `contracts/` entry and includes it in the same
+commit. It exists because a generated artifact has to be held to the code it describes
+at *some* moment, and with no CI a commit is the only moment there is.
+
+It is deliberately narrow. It only regenerates — it runs no tests and no linters, so a
+commit is not slowed by the gates you were going to run anyway. It only touches the
+components a commit touches, so a docs-only commit does nothing. Bypass it once with
+`git commit --no-verify`, always with `FATHOM_SKIP_CONTRACTS=1`, and uninstall it with
+`git config --unset core.hooksPath`. Nothing else in the repo installs it for you:
+pointing `core.hooksPath` into the working tree means a `git pull` can change what runs
+on your machine at commit time, which is a thing to opt into knowingly.
+
+**It wants Docker, and does what it can without it.** Contracts are produced by
+*running* each service — building its image and scraping the container over the wire —
+precisely so that no component carries code whose only job is to describe itself.
+Layer-cached that is seconds per component; cold it is a minute or more. With no daemon
+the hook still regenerates every `service.json` and the two FastAPI services, which
+publish `/openapi.json` whether they are started from an image or from their own venv;
+`fathom-mcp`'s tool list and the two port checks are skipped and named. A hook that
+blocked every commit on a daemon being up would train people into `--no-verify`, which
+disables it for everything.
+
+Whether or not you install it, `make contracts-check` fails on a drifted contract and is
+part of the root `make check`.
 
 The one thing that *does* run on a schedule is `eval/`, as two Kubernetes CronJobs — but
 they measure the deployed agent's answer quality, not the tree, and both ship suspended.

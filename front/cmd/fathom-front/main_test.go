@@ -204,3 +204,44 @@ func TestSpanPathCollapsesIds(t *testing.T) {
 		}
 	}
 }
+
+// TestDocumentedRoutesAreServed pins the route list published in
+// contracts/front/integration-notes.md against the mux that actually serves it.
+//
+// fathom-front publishes no machine-readable spec: Go's ServeMux does not report
+// what was registered with it, and there is nothing for the contract scraper to
+// dial blind. The route list is therefore hand-written, and this test is the only
+// thing keeping it honest -- a documented route that 404s here is a lie in the
+// contract, and a route added to newMux without a line in the notes is an
+// undocumented surface. Update both together or this fails.
+func TestDocumentedRoutesAreServed(t *testing.T) {
+	documented := []struct {
+		method string
+		// path is what a browser sends, so a subtree is dialled at a child.
+		path string
+	}{
+		{http.MethodPost, "/api/chat"},
+		{http.MethodGet, "/api/eval/runs"},
+		{http.MethodGet, "/api/features"},
+		{http.MethodGet, "/healthz"},
+		{http.MethodGet, "/readyz"},
+		{http.MethodGet, "/"},
+	}
+
+	var chat, eval int
+	cfg := testConfig("http://127.0.0.1:1")
+	cfg.EvalURL = "http://eval.invalid:8080"
+	mux := newMux(cfg, handlers{
+		chat: stubHandler(&chat),
+		eval: stubHandler(&eval),
+		ui:   stubHandler(new(int)),
+	}, quietLog())
+
+	for _, r := range documented {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(r.method, r.path, nil))
+		if rec.Code == http.StatusNotFound {
+			t.Errorf("%s %s: 404, but integration-notes.md documents it", r.method, r.path)
+		}
+	}
+}

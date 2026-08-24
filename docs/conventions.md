@@ -1,6 +1,6 @@
 ---
 schema-version: 1
-generated-from: 0fbfc6eb442567b10375c9104a30e1fc32a45f03
+generated-from: eebf9d27bd6a24d688dd283b406f86f6a9f5bc1f
 generated: 2026-08-23
 services-covered: [agent, mcp, front, eval]
 ---
@@ -254,12 +254,17 @@ All four components implement the same fourteen targets with the same meanings, 
 all four at the sha above:
 
 ```
-help build fmt lint test check image push lint-chart render-chart run-local version clean all
+help build fmt lint test check image push lint-chart render-chart run-local
+version clean all
 ```
 
 `make` with no target prints `help`. `fmt` is a **check, never a rewrite**. `check` is
 `fmt lint test lint-chart` plus component extras. `VERSION` defaults to
 `git describe --tags --always --dirty`.
+
+There is deliberately **no `contract` target**. Contracts are produced by running each
+component's image from the outside -- see [Contracts](#contracts) -- so nothing a
+component builds or prints exists in order to describe it.
 
 Component-specific targets are allowed and are named so they read as specific:
 `run-stdio` (mcp), `venv`/`lock`/`lock-check` (agent, eval), `test-ui` (front),
@@ -375,6 +380,97 @@ than an absent one — the caller spends a turn discovering it and reads the fai
 outage rather than a deployment choice. Adding the URL is a values change and a rollout,
 never a code change. **Gate a new optional dependency this way.**
 
+### Contracts
+
+`contracts/<component>/` is generated and must never be edited by hand. It is what a
+caller reads instead of the callee's source -- the interface is the only part of a
+sibling most work actually needs, and reading three services to change one is the cost
+`cross-service-work` exists to avoid.
+
+The rule the whole directory is built around:
+
+> **No component contains a line of code that exists to produce a contract.**
+
+No `contract` target, no `-contract` flag, no module whose job is to describe its
+service. A contract assembled from declarations sitting beside the code is a second
+source of truth, and a second source of truth drifts. One taken off the wire *is* the
+interface, because it is the same bytes a caller receives.
+
+`scripts/contracts.py` builds each component's image, starts it in a throwaway container
+configured the way its own chart configures it, and scrapes it:
+
+| Component | Scraped how |
+|---|---|
+| `agent` | `GET /openapi.json` -- FastAPI publishes it already |
+| `mcp` | `initialize` + `tools/list` over streamable HTTP, twice: `prometheus.url` unset, then set |
+| `eval` | `GET /openapi.json`, plus the applied DDL read out of `sqlite_master` in a database the image builds for itself |
+| `front` | nothing -- see below |
+
+`helm template` supplies what a process cannot know about itself: namespace, Service
+type, nodePort, RBAC, probes. Published per component: `service.json`, plus
+`openapi.json` / `mcp-tools.json` / `storage.json` + `schema.sql` +
+`fixture-namespaces.json` as that component actually has them. `front` is the only one
+with no interface file of its own.
+
+**The container run is also the port check.** The sandbox runs the component with its
+chart's own environment and dials its chart's own `containerPort`. The comparison it
+replaced -- a binary's *default* listen port against `service.port` -- asserted a
+coincidence rather than a requirement: every Deployment here sets `FATHOM_<C>_ADDR` from
+`service.port`, so the code default never applies in the cluster, and the check would
+have failed a chart that legitimately published a non-default port while never
+establishing that the process listens anywhere in particular. Verified: misspell the
+env var name and move `service.port` off the code default, and the run fails naming the
+port nothing answered on.
+
+**Docker is required**, because this runs the services -- except for the half that a
+venv can serve. FastAPI publishes `/openapi.json` itself, so without a daemon
+`make contracts` still regenerates every `service.json` (that is `helm template`) and
+the full `agent` and `eval` sets, by starting them with `python -m` from their own venvs
+and scraping the identical endpoint; the output is byte-identical to the container run.
+`mcp-tools.json` and both `containerPort` checks need a container, so they are named on
+stderr and left alone -- never deleted, since an absent file reads as a removed
+interface. `make contracts-check` refuses the fallback outright: it is the drift gate,
+and one that silently checks less than it claims is worse than one that refuses.
+`.githooks/pre-commit` therefore regenerates what it can rather than skipping outright.
+
+Three rules for a new component or a new interface:
+
+1. **Add nothing to the service in order to describe it.** If the interface is not
+   already reachable from outside a running container, that is a fact about the
+   interface, not a gap to fill with a describe-myself module.
+2. **Prefer a framework that publishes its own interface.** This is the one legitimate
+   way to change a service to get a contract, because what you are changing is how it
+   serves, not adding something that only describes. `fathom-eval-serve` moved from
+   aiohttp to FastAPI on 2026-08-23 for exactly this: it is the only pure JSON API in
+   the repo, its responses cross a namespace boundary into `evals.js`, and aiohttp
+   published no description of any of it. The cost was three wheels in a batch image.
+   A `response_model` is serialisation, not documentation -- but it must never *narrow*
+   a payload, so every one of them carries `extra="allow"` and a test that drives a real
+   request and compares what the client received against what the layer below produced
+   (`test_response_models_drop_nothing`, `test_chat_response_model_drops_nothing`).
+3. **What still cannot be scraped is documented by hand and pinned by a test that dials
+   it.** `fathom-front` is the only case left: Go's `ServeMux` does not report what was
+   registered with it, and the binary serves a UI rather than an API, so a framework
+   swap would buy nothing. Its route table lives in `integration-notes.md`, guarded by
+   `TestDocumentedRoutesAreServed`, which dials every documented row through the real
+   mux. A hand-written route list with no guard is the second source of truth this repo
+   keeps avoiding; one with a guard is a test fixture that happens to be readable.
+
+`integration-notes.md` is the exception to all of it: hand-written, created once from a
+stub and never touched again. Retry semantics, timeout nesting, idempotency and ordering
+cannot be expressed by a spec and are what cause incidents.
+
+`integration-notes.md` is also where the prose that used to be declared in source now
+lives: a service's dependencies, its retry semantics, its timeout nesting.
+
+Regenerate with `make contracts` (or `COMPONENT=<name>`). `make contracts-check` fails
+on drift and is wired into the root `make check`. `make hooks` installs
+`.githooks/pre-commit`, which regenerates the components a commit touches and includes
+the result in that commit -- there is no CI here, so a commit is the only moment a
+generated artifact can be held to the code it describes. It is not a cheap hook: it
+builds an image per touched component, which Docker's layer cache makes seconds in the
+common case and a minute or more cold.
+
 ### Two-file agreements
 
 The places where one setting lives in two files. Everything else has exactly one home.
@@ -452,7 +548,8 @@ In order:
 1. Copy the nearest sibling's skeleton — `eval/` for Python, `front/` for Go — and
    rename per [Naming](#naming). Use the directory-named Go module path.
 2. Implement the fourteen shared `make` targets before anything else. They are how
-   everything else in the repo invokes you.
+   everything else in the repo invokes you. `contract` is the one with a consumer
+   outside your own directory -- see [Contracts](#contracts).
 3. Write `helm/`, including `NOTES.txt`. Set `namespace.create` correctly: `false` if you
    live in `fathom`.
 4. Wire telemetry at construction, and exclude your probes.
@@ -462,7 +559,10 @@ In order:
    together, prerequisites, build and push, install, verify, the API if it has one,
    **a Helm value table**, telemetry, running outside the cluster, troubleshooting,
    upgrade and uninstall.
-7. Update root `README.md` and `CLAUDE.md`. Both enumerate components in several places
+7. Run `make contracts` and commit `contracts/<component>/`, then fill in its
+   `integration-notes.md` — the generator creates that file once and never touches it
+   again, so an empty one stays empty.
+8. Update root `README.md` and `CLAUDE.md`. Both enumerate components in several places
    — the counts drift silently otherwise, which is exactly what the
    2026-08-22 documentation audit found.
 
@@ -476,9 +576,18 @@ unnecessary. That is the real fix.
 `generated-from` is the sha this was verified against. Before relying on it:
 
 ```sh
-git log --oneline 0fbfc6eb442567b10375c9104a30e1fc32a45f03..HEAD -- agent/ mcp/ front/ eval/
+git log --oneline eebf9d27bd6a24d688dd283b406f86f6a9f5bc1f..HEAD -- agent/ mcp/ front/ eval/
 ```
 
 If the components have moved substantially, refresh the affected sections rather than
-working against a stale spec. A pre-commit hook that regenerates the mechanical parts
-and fails on a diff would stop it lagging at all.
+working against a stale spec.
+
+The sha above is a parent commit, not this file's own -- a file cannot name the commit
+that contains it. Expect it to trail by one.
+
+The mechanical half of that problem is now solved elsewhere: `contracts/` is regenerated
+from the services themselves, by `make contracts` and by the pre-commit hook, and
+`make contracts-check` fails on drift. **This file is the half that is still written by
+hand** -- it holds the reasoning, the prohibitions and the shapes you copy, none of which
+a generator can produce. When the two disagree about a mechanical fact, `contracts/` is
+right, because it ran the code.

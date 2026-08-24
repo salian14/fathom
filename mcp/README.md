@@ -383,3 +383,26 @@ life of the pod and none of them saying anything a span could add:
 `tools/call` is exempt from that last rule. It is the actual work and it is low
 volume, so keeping it means a propagation failure shows up as unparented root
 spans rather than as silence.
+
+## The published contract
+
+`contracts/mcp/` describes this service's interface, and is **generated** — never
+edit it.
+
+`scripts/contracts.py` starts this component's image in a throwaway container and
+runs a real `initialize` + `tools/list` against it — twice, with `prometheus.url` unset
+and then set, because three of the six tools are gated on it. **Nothing in this service
+exists to produce that** — no `contract` target, no `-contract` flag.
+
+The chart supplies what a process cannot know about itself — namespace, Service type,
+nodePort, RBAC, probes. The sandbox runs the container with the chart's own environment
+and dials its `containerPort`, so a pod that would start, pass its probes and be
+unreachable through its Service fails here instead.
+
+```sh
+make -C .. contracts COMPONENT=mcp   # needs Docker: this runs the service
+make -C .. contracts-check              # fail on drift; also part of the root `make check`
+```
+
+`make -C .. hooks` installs the pre-commit hook that regenerates it for you.
+`contracts/mcp/integration-notes.md` is the one file in there written by hand.

@@ -1,0 +1,16 @@
+{
+  "layout_version": 2,
+  "namespaces": [
+    "fathom-eval-cpu-throttle",
+    "fathom-eval-crashloop",
+    "fathom-eval-healthy",
+    "fathom-eval-imagepull",
+    "fathom-eval-missing-configmap",
+    "fathom-eval-oomkill",
+    "fathom-eval-pending",
+    "fathom-eval-prom-restarts",
+    "fathom-eval-secret-bait",
+    "fathom-eval-service-no-endpoints"
+  ],
+  "note": "Read out of the packaged fixtures by running the image. Two-file agreement: these must appear in eval/helm -> rbac.fixtureNamespaces or the harness cannot stage them."
+}
