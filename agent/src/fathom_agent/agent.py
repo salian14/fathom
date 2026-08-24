@@ -1,4 +1,4 @@
-"""The agent loop: a LangGraph ReAct graph over the MCP tools.
+"""The agent loop: a LangChain agent graph over the MCP tools.
 
 Kept deliberately small. The graph is rebuilt per request because its tools are
 bound to a per-request MCP session (see mcp_client), and building it is cheap next
@@ -11,9 +11,10 @@ import json
 import logging
 from typing import Any
 
+from langchain.agents import create_agent
+from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
-from langgraph.prebuilt import create_react_agent
 
 from .config import Config
 
@@ -55,7 +56,33 @@ false and say so in `summary`. Do not invent a fix the answer does not support.\
 
 
 def build_graph(cfg: Config, model, tools: list[BaseTool]):
-    return create_react_agent(model, tools, prompt=SystemMessage(cfg.system_prompt))
+    """The tool-calling loop, with its iteration ceiling attached.
+
+    The ceiling is middleware rather than a `recursion_limit` passed at invoke
+    time. `create_agent` compiles with `recursion_limit=9_999` and has no
+    `remaining_steps`, so leaning on the graph's own limit would raise
+    `GraphRecursionError` mid-turn -- and an exception costs the caller the tool
+    trace, which is the one thing worth having when a turn does not converge.
+    `exit_behavior="end"` stops it the way the old prebuilt graph did: a closing
+    message and intact state, so /chat still answers 200 with its `steps`.
+
+    `run_limit` counts *model calls*, not tool rounds: max_iterations rounds plus
+    the call that answers. One difference from the old `2n + 1` recursion budget
+    is worth knowing -- a model that never converges now runs its last tool round
+    instead of having the result discarded. FATHOM_AGENT_REQUEST_TIMEOUT is what
+    bounds the clock either way.
+    """
+    return create_agent(
+        model,
+        tools,
+        system_prompt=SystemMessage(cfg.system_prompt),
+        middleware=[
+            ModelCallLimitMiddleware(
+                run_limit=cfg.max_iterations + 1,
+                exit_behavior="end",
+            )
+        ],
+    )
 
 
 def build_messages(question: str, history: list[dict[str, str]] | None) -> list[Any]:
@@ -114,6 +141,11 @@ def _answer(messages: list[Any], steps: list[dict[str, Any]]) -> str:
     for message in reversed(messages):
         if isinstance(message, AIMessage) and not message.tool_calls:
             text = _text(message.content).strip()
+            # ModelCallLimitMiddleware ends the loop by appending a message of its
+            # own. Left alone it would *be* the answer, and "Model call limits
+            # exceeded: run limit (8/8)" tells the caller nothing they can act on.
+            if text.startswith(_CEILING_SENTINEL):
+                return CEILING_ANSWER
             if text:
                 return text
 
@@ -213,10 +245,21 @@ def _clean_remediation(parsed: dict) -> dict:
     return out
 
 
-# The openings of the two fallbacks _answer() produces, plus LangGraph's own
-# short-circuit string. Matched by prefix because only the opening clause is stable.
+# The opening of ModelCallLimitMiddleware's closing message, which is the only
+# library string this module reads. Prefix-matched because the counts that follow
+# it vary; translated on sight into CEILING_ANSWER, so it never reaches a caller.
+_CEILING_SENTINEL = "Model call limits exceeded"
+
+CEILING_ANSWER = (
+    "The model hit the iteration ceiling (FATHOM_AGENT_MAX_ITERATIONS) before it "
+    "produced an answer. The tool calls it did make are in `steps`."
+)
+
+# The openings of the three fallbacks _answer() produces. Every one of them is
+# ours, so shaping is no longer gated on a phrase a library upgrade can reword.
+# Matched by prefix because only the opening clause is stable.
 _NO_ANSWER_PREFIXES = (
+    "The model hit the iteration ceiling",
     "The model stopped while still calling tools",
     "The model finished without producing an answer",
-    "Sorry, need more steps to process this request.",
 )

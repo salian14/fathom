@@ -7,8 +7,10 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi==0.141.1",
     "uvicorn==0.52.3",
-    "langgraph==1.2.11",
-    "langchain-core==1.5.5",
+    # `langchain` owns create_agent; langgraph is no longer imported directly and
+    # arrives through it (langchain pins >=1.2.11,<1.3.0), recorded in the lock.
+    "langchain==1.3.16",
+    "langchain-core==1.6.0",
     "langchain-ollama==1.1.0",
     "langchain-mcp-adapters==0.3.2",
     "httpx==0.28.1",

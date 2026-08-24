@@ -195,13 +195,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 async with asyncio.timeout(cfg.request_timeout):
                     async with tool_session(cfg, app.state.mcp) as tools:
                         graph = build_graph(cfg, app.state.model, tools)
-                        result = await graph.ainvoke(
-                            {"messages": messages},
-                            # LangGraph counts every node it runs, and one tool-calling
-                            # round is two nodes (model, then tools), plus the final
-                            # model turn that answers.
-                            {"recursion_limit": 2 * cfg.max_iterations + 1},
-                        )
+                        # The iteration ceiling rides on the graph itself -- see
+                        # build_graph -- so there is nothing to pass here.
+                        result = await graph.ainvoke({"messages": messages})
             except TimeoutError:
                 _record_turn(span, "timeout", started)
                 return JSONResponse(
