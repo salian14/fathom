@@ -1,22 +1,259 @@
 {
   "components": {
     "schemas": {
+      "EmptyState": {
+        "additionalProperties": true,
+        "description": "No results database yet.\n\n**A 200, not a 404 and not a 503.** A cluster whose CronJob has never run is a\ncorrect state of the system and renders as an empty view; a client that treats this\nas an outage shows a red banner on every fresh install.",
+        "properties": {
+          "empty": {
+            "title": "Empty",
+            "type": "boolean"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "results": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "runs": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Runs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "empty",
+          "reason"
+        ],
+        "title": "EmptyState",
+        "type": "object"
+      },
       "Error": {
-        "description": "The same envelope fathom-agent and fathom-front use, so a caller has one shape to parse rather than one per origin.",
+        "description": "The one error envelope. `evals.js` parses this for every failing status, and so\ndo fathom-agent and fathom-front's proxy -- one shape per client, not one per\nfailure origin.",
         "properties": {
           "error": {
+            "title": "Error",
             "type": "string"
           }
         },
         "required": [
           "error"
         ],
+        "title": "Error",
+        "type": "object"
+      },
+      "Meta": {
+        "additionalProperties": true,
+        "description": "What database this service is reading and what it will serve.",
+        "properties": {
+          "database": {
+            "additionalProperties": true,
+            "title": "Database",
+            "type": "object"
+          },
+          "max_rows": {
+            "title": "Max Rows",
+            "type": "integer"
+          },
+          "schema_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schema Version"
+          }
+        },
+        "required": [
+          "database",
+          "max_rows"
+        ],
+        "title": "Meta",
+        "type": "object"
+      },
+      "ResultDetail": {
+        "additionalProperties": true,
+        "description": "One result in full -- the only endpoint carrying free text.\n\nThe rows inside stay open on purpose. `result` is a `results` row (`SELECT *`) plus\nthe decoded `steps` and `remediation`, and `json_errors` when a stored JSON column\nfailed to parse -- its presence is the signal, and the row is still served, because\na bad column should not hide the result. Those columns are the database's to declare\nand `schema.sql` is where they are published.\n\n**`raw_json` is deliberately absent** from the judgements here: it is the judge\nmodel's unparsed reply, and it is not part of this interface.",
+        "properties": {
+          "category_order": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Category Order",
+            "type": "array"
+          },
+          "checks": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "judgements": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Judgements",
+            "type": "array"
+          },
+          "result": {
+            "additionalProperties": true,
+            "title": "Result",
+            "type": "object"
+          },
+          "run": {
+            "additionalProperties": true,
+            "title": "Run",
+            "type": "object"
+          }
+        },
+        "required": [
+          "result",
+          "run",
+          "checks",
+          "category_order",
+          "judgements"
+        ],
+        "title": "ResultDetail",
+        "type": "object"
+      },
+      "RunDetail": {
+        "additionalProperties": true,
+        "description": "One run, its per-fixture and per-check summaries, and a page of its results.",
+        "properties": {
+          "category_order": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Category Order",
+            "type": "array"
+          },
+          "checks": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "fixtures": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Fixtures",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "rubric": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rubric"
+          },
+          "rubric_versions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Rubric Versions",
+            "type": "array"
+          },
+          "run": {
+            "additionalProperties": true,
+            "title": "Run",
+            "type": "object"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run",
+          "fixtures",
+          "checks",
+          "category_order",
+          "rubric_versions",
+          "results",
+          "limit",
+          "offset",
+          "total"
+        ],
+        "title": "RunDetail",
+        "type": "object"
+      },
+      "RunList": {
+        "additionalProperties": true,
+        "description": "The eval runs, newest first.",
+        "properties": {
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "runs": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Runs",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "runs",
+          "limit",
+          "offset",
+          "total"
+        ],
+        "title": "RunList",
         "type": "object"
       }
     }
   },
   "info": {
-    "description": "A read-only HTTP view of the eval results database. It exists because SQLite is a library rather than a server, and fathom-front's eval view is in another namespace and cannot mount the volume. Unauthenticated and ClusterIP: never expose it.",
+    "summary": "A read-only HTTP view of the eval results database.",
     "title": "fathom-eval-serve",
     "version": "0.5.4"
   },
@@ -24,6 +261,7 @@
   "paths": {
     "/healthz": {
       "get": {
+        "operationId": "healthz_healthz_get",
         "responses": {
           "200": {
             "content": {
@@ -33,42 +271,7 @@
                 }
               }
             },
-            "description": "ok"
-          },
-          "405": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            },
-            "description": "Only GET is accepted here."
-          }
-        },
-        "summary": "Liveness: this process is up. Never traced."
-      },
-      "head": {
-        "responses": {
-          "200": {
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            },
-            "description": "ok"
-          },
-          "405": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            },
-            "description": "Only GET is accepted here."
+            "description": "Successful Response"
           }
         },
         "summary": "Liveness: this process is up. Never traced."
@@ -76,87 +279,17 @@
     },
     "/meta": {
       "get": {
+        "operationId": "meta_meta_get",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "properties": {
-                    "database": {
-                      "description": "Path, presence and size of results.db.",
-                      "type": "object"
-                    },
-                    "max_rows": {
-                      "description": "The cap this service applies to any limit.",
-                      "type": "integer"
-                    },
-                    "schema_version": {
-                      "description": "Absent when there is no database. A version newer than the reader's is a 503, not a best-effort read.",
-                      "type": "integer"
-                    }
-                  },
-                  "required": [
-                    "database",
-                    "max_rows"
-                  ],
-                  "type": "object"
+                  "$ref": "#/components/schemas/Meta"
                 }
               }
             },
-            "description": "Present even when there is no database yet."
-          },
-          "405": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            },
-            "description": "Only GET is accepted here."
-          }
-        },
-        "summary": "What database this service is reading and what it will serve."
-      },
-      "head": {
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "properties": {
-                    "database": {
-                      "description": "Path, presence and size of results.db.",
-                      "type": "object"
-                    },
-                    "max_rows": {
-                      "description": "The cap this service applies to any limit.",
-                      "type": "integer"
-                    },
-                    "schema_version": {
-                      "description": "Absent when there is no database. A version newer than the reader's is a 503, not a best-effort read.",
-                      "type": "integer"
-                    }
-                  },
-                  "required": [
-                    "database",
-                    "max_rows"
-                  ],
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Present even when there is no database yet."
-          },
-          "405": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            },
-            "description": "Only GET is accepted here."
+            "description": "Successful Response"
           }
         },
         "summary": "What database this service is reading and what it will serve."
@@ -164,6 +297,7 @@
     },
     "/readyz": {
       "get": {
+        "operationId": "readyz_readyz_get",
         "responses": {
           "200": {
             "content": {
@@ -173,61 +307,9 @@
                 }
               }
             },
-            "description": "ok, and whether a database is present yet. An absent database is a correct state, not a failure -- it renders as an empty view."
-          },
-          "405": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            },
-            "description": "Only GET is accepted here."
+            "description": "Successful Response"
           },
           "503": {
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            },
-            "description": "The data directory is not mounted, or not readable."
-          }
-        },
-        "summary": "Readiness: /data is mounted and readable."
-      },
-      "head": {
-        "responses": {
-          "200": {
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            },
-            "description": "ok, and whether a database is present yet. An absent database is a correct state, not a failure -- it renders as an empty view."
-          },
-          "405": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            },
-            "description": "Only GET is accepted here."
-          },
-          "503": {
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            },
             "description": "The data directory is not mounted, or not readable."
           }
         },
@@ -236,13 +318,14 @@
     },
     "/results/{id}": {
       "get": {
-        "description": "The only endpoint that returns free text -- the agent's answer, the question and the judge's rationale. `results.answer` is verbatim, which includes the canary the secret-bait fixture plants. This is why the service is ClusterIP and unauthenticated rather than exposed.",
+        "operationId": "result_detail_results__id__get",
         "parameters": [
           {
             "in": "path",
             "name": "id",
             "required": true,
             "schema": {
+              "title": "Id",
               "type": "integer"
             }
           }
@@ -252,16 +335,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ResultDetail"
+                    },
+                    {
+                      "$ref": "#/components/schemas/EmptyState"
+                    }
+                  ],
+                  "title": "Response Result Detail Results  Id  Get"
                 }
               }
             },
-            "description": "The results row, with steps, remediation and checks decoded."
+            "description": "Successful Response"
           },
           "404": {
-            "description": "No such result."
-          },
-          "405": {
             "content": {
               "application/json": {
                 "schema": {
@@ -269,38 +357,9 @@
                 }
               }
             },
-            "description": "Only GET is accepted here."
-          }
-        },
-        "summary": "One graded answer, in full."
-      },
-      "head": {
-        "description": "The only endpoint that returns free text -- the agent's answer, the question and the judge's rationale. `results.answer` is verbatim, which includes the canary the secret-bait fixture plants. This is why the service is ClusterIP and unauthenticated rather than exposed.",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "type": "integer"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            },
-            "description": "The results row, with steps, remediation and checks decoded."
-          },
-          "404": {
             "description": "No such result."
           },
-          "405": {
+          "422": {
             "content": {
               "application/json": {
                 "schema": {
@@ -308,33 +367,60 @@
                 }
               }
             },
-            "description": "Only GET is accepted here."
+            "description": "A query or path parameter did not validate. Carries this service's {\"error\": ...} envelope, not FastAPI's default {\"detail\": [...]}."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The database is unreadable, or its schema is newer than this reader's. A schema-too-new 503 will not resolve on retry: roll the reader forward. Best-effort parsing would report wrong numbers, which is worse than reporting nothing."
           }
         },
-        "summary": "One graded answer, in full."
+        "summary": "One result in full. The only endpoint carrying free text."
       }
     },
     "/runs": {
       "get": {
+        "operationId": "runs_runs_get",
         "parameters": [
           {
-            "description": "Capped at max_rows.",
+            "description": "Silently capped at meta.max_rows.",
             "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
-              "default": 50,
-              "type": "integer"
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Silently capped at meta.max_rows.",
+              "title": "Limit"
             }
           },
           {
-            "description": "",
             "in": "query",
             "name": "offset",
             "required": false,
             "schema": {
-              "default": 0,
-              "type": "integer"
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Offset"
             }
           }
         ],
@@ -343,42 +429,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "properties": {
-                    "empty": {
-                      "type": "boolean"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RunList"
                     },
-                    "limit": {
-                      "type": "integer"
-                    },
-                    "offset": {
-                      "type": "integer"
-                    },
-                    "reason": {
-                      "type": "string"
-                    },
-                    "runs": {
-                      "items": {
-                        "type": "object"
-                      },
-                      "type": "array"
-                    },
-                    "total": {
-                      "type": "integer"
+                    {
+                      "$ref": "#/components/schemas/EmptyState"
                     }
-                  },
-                  "required": [
-                    "runs",
-                    "limit",
-                    "offset",
-                    "total"
                   ],
-                  "type": "object"
+                  "title": "Response Runs Runs Get"
                 }
               }
             },
-            "description": "An absent database is 200 with empty:true, not an error."
+            "description": "Successful Response"
           },
-          "405": {
+          "422": {
             "content": {
               "application/json": {
                 "schema": {
@@ -386,78 +451,9 @@
                 }
               }
             },
-            "description": "Only GET is accepted here."
+            "description": "A query or path parameter did not validate. Carries this service's {\"error\": ...} envelope, not FastAPI's default {\"detail\": [...]}."
           },
           "503": {
-            "description": "Database unreadable, or written by a newer harness."
-          }
-        },
-        "summary": "The eval runs, newest first."
-      },
-      "head": {
-        "parameters": [
-          {
-            "description": "Capped at max_rows.",
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "default": 50,
-              "type": "integer"
-            }
-          },
-          {
-            "description": "",
-            "in": "query",
-            "name": "offset",
-            "required": false,
-            "schema": {
-              "default": 0,
-              "type": "integer"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "properties": {
-                    "empty": {
-                      "type": "boolean"
-                    },
-                    "limit": {
-                      "type": "integer"
-                    },
-                    "offset": {
-                      "type": "integer"
-                    },
-                    "reason": {
-                      "type": "string"
-                    },
-                    "runs": {
-                      "items": {
-                        "type": "object"
-                      },
-                      "type": "array"
-                    },
-                    "total": {
-                      "type": "integer"
-                    }
-                  },
-                  "required": [
-                    "runs",
-                    "limit",
-                    "offset",
-                    "total"
-                  ],
-                  "type": "object"
-                }
-              }
-            },
-            "description": "An absent database is 200 with empty:true, not an error."
-          },
-          "405": {
             "content": {
               "application/json": {
                 "schema": {
@@ -465,10 +461,7 @@
                 }
               }
             },
-            "description": "Only GET is accepted here."
-          },
-          "503": {
-            "description": "Database unreadable, or written by a newer harness."
+            "description": "The database is unreadable, or its schema is newer than this reader's. A schema-too-new 503 will not resolve on retry: roll the reader forward. Best-effort parsing would report wrong numbers, which is worse than reporting nothing."
           }
         },
         "summary": "The eval runs, newest first."
@@ -476,73 +469,113 @@
     },
     "/runs/{id}": {
       "get": {
+        "operationId": "run_detail_runs__id__get",
         "parameters": [
           {
             "in": "path",
             "name": "id",
             "required": true,
             "schema": {
+              "title": "Id",
               "type": "integer"
             }
           },
           {
-            "description": "",
+            "description": "Defaults to the newest.",
+            "in": "query",
+            "name": "rubric",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Defaults to the newest.",
+              "title": "Rubric"
+            }
+          },
+          {
             "in": "query",
             "name": "fixture",
             "required": false,
             "schema": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fixture"
             }
           },
           {
-            "description": "Defaults to and is capped at max_rows.",
             "in": "query",
-            "name": "limit",
+            "name": "outcome",
             "required": false,
             "schema": {
-              "type": "integer"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Outcome"
             }
           },
           {
-            "description": "",
-            "in": "query",
-            "name": "offset",
-            "required": false,
-            "schema": {
-              "default": 0,
-              "type": "integer"
-            }
-          },
-          {
-            "description": "",
+            "description": "\"natural\" or \"interesting\".",
             "in": "query",
             "name": "order",
             "required": false,
             "schema": {
               "default": "natural",
-              "enum": [
-                "natural",
-                "interesting"
+              "description": "\"natural\" or \"interesting\".",
+              "title": "Order",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Silently capped at meta.max_rows.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
               ],
-              "type": "string"
+              "description": "Silently capped at meta.max_rows.",
+              "title": "Limit"
             }
           },
           {
-            "description": "",
             "in": "query",
-            "name": "outcome",
+            "name": "offset",
             "required": false,
             "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Defaults to the newest version present.",
-            "in": "query",
-            "name": "rubric",
-            "required": false,
-            "schema": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Offset"
             }
           }
         ],
@@ -551,72 +584,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "properties": {
-                    "category_order": {
-                      "items": {
-                        "type": "string"
-                      },
-                      "type": "array"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RunDetail"
                     },
-                    "checks": {
-                      "items": {
-                        "type": "object"
-                      },
-                      "type": "array"
-                    },
-                    "fixtures": {
-                      "items": {
-                        "type": "object"
-                      },
-                      "type": "array"
-                    },
-                    "limit": {
-                      "type": "integer"
-                    },
-                    "offset": {
-                      "type": "integer"
-                    },
-                    "results": {
-                      "items": {
-                        "type": "object"
-                      },
-                      "type": "array"
-                    },
-                    "rubric": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "rubric_versions": {
-                      "items": {
-                        "type": "string"
-                      },
-                      "type": "array"
-                    },
-                    "run": {
-                      "type": "object"
-                    },
-                    "total": {
-                      "type": "integer"
+                    {
+                      "$ref": "#/components/schemas/EmptyState"
                     }
-                  },
-                  "required": [
-                    "run",
-                    "fixtures",
-                    "checks",
-                    "results"
                   ],
-                  "type": "object"
+                  "title": "Response Run Detail Runs  Id  Get"
                 }
               }
             },
-            "description": "The run and everything needed to render it in one request."
+            "description": "Successful Response"
           },
           "404": {
-            "description": "No such run."
-          },
-          "405": {
             "content": {
               "application/json": {
                 "schema": {
@@ -624,153 +606,9 @@
                 }
               }
             },
-            "description": "Only GET is accepted here."
-          }
-        },
-        "summary": "One run: its totals, its fixtures, its checks and its results."
-      },
-      "head": {
-        "parameters": [
-          {
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "type": "integer"
-            }
-          },
-          {
-            "description": "",
-            "in": "query",
-            "name": "fixture",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Defaults to and is capped at max_rows.",
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "type": "integer"
-            }
-          },
-          {
-            "description": "",
-            "in": "query",
-            "name": "offset",
-            "required": false,
-            "schema": {
-              "default": 0,
-              "type": "integer"
-            }
-          },
-          {
-            "description": "",
-            "in": "query",
-            "name": "order",
-            "required": false,
-            "schema": {
-              "default": "natural",
-              "enum": [
-                "natural",
-                "interesting"
-              ],
-              "type": "string"
-            }
-          },
-          {
-            "description": "",
-            "in": "query",
-            "name": "outcome",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "Defaults to the newest version present.",
-            "in": "query",
-            "name": "rubric",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "properties": {
-                    "category_order": {
-                      "items": {
-                        "type": "string"
-                      },
-                      "type": "array"
-                    },
-                    "checks": {
-                      "items": {
-                        "type": "object"
-                      },
-                      "type": "array"
-                    },
-                    "fixtures": {
-                      "items": {
-                        "type": "object"
-                      },
-                      "type": "array"
-                    },
-                    "limit": {
-                      "type": "integer"
-                    },
-                    "offset": {
-                      "type": "integer"
-                    },
-                    "results": {
-                      "items": {
-                        "type": "object"
-                      },
-                      "type": "array"
-                    },
-                    "rubric": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "rubric_versions": {
-                      "items": {
-                        "type": "string"
-                      },
-                      "type": "array"
-                    },
-                    "run": {
-                      "type": "object"
-                    },
-                    "total": {
-                      "type": "integer"
-                    }
-                  },
-                  "required": [
-                    "run",
-                    "fixtures",
-                    "checks",
-                    "results"
-                  ],
-                  "type": "object"
-                }
-              }
-            },
-            "description": "The run and everything needed to render it in one request."
-          },
-          "404": {
             "description": "No such run."
           },
-          "405": {
+          "422": {
             "content": {
               "application/json": {
                 "schema": {
@@ -778,10 +616,20 @@
                 }
               }
             },
-            "description": "Only GET is accepted here."
+            "description": "A query or path parameter did not validate. Carries this service's {\"error\": ...} envelope, not FastAPI's default {\"detail\": [...]}."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The database is unreadable, or its schema is newer than this reader's. A schema-too-new 503 will not resolve on retry: roll the reader forward. Best-effort parsing would report wrong numbers, which is worse than reporting nothing."
           }
         },
-        "summary": "One run: its totals, its fixtures, its checks and its results."
+        "summary": "One run, with its fixture and check summaries and a page of results."
       }
     }
   }

@@ -596,15 +596,15 @@ two ways that are easy to misread as omissions:
   harness with telemetry disabled does not break the trace for the services it calls.
 
 The read service is the exception, since it *is* a server: it adds
-`AioHttpServerInstrumentor`, and excludes its probes the way everything else in
-Fathom does. `serve.py` sets `OTEL_PYTHON_AIOHTTP_SERVER_EXCLUDED_URLS` itself rather
-than leaving it to the chart — the exclusion is a property of the code, not of a
-deployment.
+`FastAPIInstrumentor`, and excludes its probes the way everything else in Fathom does.
+`serve.py` passes `excluded_urls` at construction rather than leaving it to the chart —
+the exclusion is a property of the code, not of a deployment — which is the identical
+call `fathom-agent` makes, since both are FastAPI.
 
 ## Targets
 
 `make -C eval <target>` — the shared vocabulary works here as in the other three:
-`help build fmt lint test check image push lint-chart render-chart contract run-local
+`help build fmt lint test check image push lint-chart render-chart run-local
 version clean all`. Component-specific: `venv`, `lock`, `lock-check`, `run-judge`,
 `run-now`, `db-pull`.
 
@@ -727,14 +727,23 @@ you meant.
 ## The published contract
 
 `contracts/eval/` describes this service's interface, and is **generated** — never
-edit it. `make contract` here prints what this component knows about itself; the writer
-in `scripts/contracts.py` merges in the chart's view and cross-checks the two, so a
-default listen port that stops matching `service.port` fails rather than shipping.
+edit it.
+
+`scripts/contracts.py` starts this component's image in a throwaway container and scrapes
+two things from it. The read service is FastAPI, so `contracts/eval/openapi.json` is its
+own `/openapi.json` fetched over HTTP — the same way `fathom-agent`'s is obtained, and
+with no describe-myself code in this component either. And the **applied**
+results-database schema is read back out of `sqlite_master` in a database the image
+builds for itself — `SCHEMA` plus every migration, not the DDL constant.
+
+The chart supplies what a process cannot know about itself — namespace, Service type,
+nodePort, RBAC, probes. The sandbox runs the container with the chart's own environment
+and dials its `containerPort`, so a pod that would start, pass its probes and be
+unreachable through its Service fails here instead.
 
 ```sh
-make contract              # this component's contract, as JSON on stdout
-make -C .. contracts COMPONENT=eval
-make -C .. contracts-check # fail on drift; also part of the root `make check`
+make -C .. contracts COMPONENT=eval   # needs Docker: this runs the service
+make -C .. contracts-check              # fail on drift; also part of the root `make check`
 ```
 
 `make -C .. hooks` installs the pre-commit hook that regenerates it for you.

@@ -5,7 +5,7 @@
 # without knowing which language is behind it:
 #
 #   help build fmt lint test check image push lint-chart render-chart
-#   contract run-local version clean all
+#   run-local version clean all
 #
 # Anything beyond that list is component-specific and named so: `test-ui` here,
 # `run-stdio` in mcp, `venv`/`lock`/`lock-check` in agent. `vet` is kept as an
@@ -44,7 +44,6 @@ help:
 	@echo "  make push           image, then docker push"
 	@echo "  make lint-chart     helm lint + template (skips without helm)"
 	@echo "  make render-chart   helm template to stdout"
-	@echo "  make contract       print this component's contract as JSON"
 	@echo "  make run-local      serve the UI on :$(LOCAL_PORT)"
 	@echo "  make test-ui        browser-side JS checks (component-specific, skips without node)"
 	@echo "  make version        show the version this build would carry"
@@ -115,15 +114,6 @@ lint-chart:
 .PHONY: render-chart
 render-chart:
 	helm template $(BINARY) $(CHART)
-
-# Print this component's published interface as one JSON document on stdout,
-# and nothing else -- the writer in scripts/contracts.py parses this, so the
-# build below is sent to stderr rather than allowed to corrupt the document.
-# Needs no agent and no listener: see contract.go.
-.PHONY: contract
-contract:
-	@$(MAKE) --no-print-directory build 1>&2
-	@./bin/$(BINARY) -contract
 
 # Serves the UI against an agent reached however you like -- usually
 # `kubectl -n fathom port-forward svc/fathom-agent 8081:8080`, or

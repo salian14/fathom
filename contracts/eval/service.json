@@ -1,28 +1,6 @@
 {
   "component": "eval",
-  "defaults": {
-    "db_path": "/data/results.db",
-    "request_timeout": 240.0,
-    "serve_addr": ":8080",
-    "serve_max_rows": 500
-  },
-  "depends_on": [
-    {
-      "contract": "contracts/agent/",
-      "name": "fathom-agent",
-      "note": "Dialled as an ordinary client, one fresh POST /chat per question.",
-      "protocol": "http",
-      "required": true
-    },
-    {
-      "contract": null,
-      "name": "ollama-judge",
-      "note": "CPU-only second Ollama on the host, :11435. Only the judge CronJob needs it; the read service does not.",
-      "protocol": "http",
-      "required": false
-    }
-  ],
-  "layout_version": 1,
+  "layout_version": 2,
   "listen_port": 8080,
   "namespaces": [
     "fathom-eval"
@@ -128,7 +106,7 @@
       ]
     }
   ],
-  "service": "fathom-eval-serve",
+  "service": "fathom-eval",
   "services": [
     {
       "name": "fathom-eval-serve",

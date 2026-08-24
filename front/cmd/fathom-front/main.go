@@ -31,17 +31,6 @@ import (
 var version = "dev"
 
 func main() {
-	// Handled before run(), and before any proxy or listener is constructed:
-	// printing the contract needs no agent, no eval service and no port, and
-	// it must keep working on a workstation that has none of them.
-	if wantContract(os.Args[1:]) {
-		if err := contract(os.Stdout); err != nil {
-			fmt.Fprintf(os.Stderr, "fathom-front: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "fathom-front: %v\n", err)
 		os.Exit(1)
@@ -131,104 +120,24 @@ type handlers struct {
 	ui   http.Handler
 }
 
-// route is one entry in this service's routing table.
-//
-// The table is the routing: newMux does nothing but walk it, so a route that
-// is not here is not served, and `-contract` describes the same slice the mux
-// was built from. Go's ServeMux does not report what was registered with it,
-// so without this the only way to publish the route list would be a second
-// hand-maintained copy -- and a contract that can disagree with the code is
-// worse than none, because it is believed.
-type route struct {
-	// Pattern is passed to ServeMux verbatim. A trailing slash is a subtree.
-	Pattern string
-	// Methods the route accepts, for the contract. Empty means any method
-	// reaches the handler; the proxy enforces its own set and answers 405.
-	Methods []string
-	// Summary is one line of prose for the generated spec.
-	Summary string
-	// Upstream names the service a proxied route forwards to, and is empty
-	// for anything handled in this process.
-	Upstream string
-	// GatedOn is the environment variable that decides whether this route
-	// exists at all, empty when it is always registered.
-	GatedOn string
-
-	// enabled reports whether to register the entry. nil means always.
-	enabled func(handlers) bool
-	// handler resolves the entry to something to serve.
-	handler func(*config.Config, handlers, *slog.Logger) http.Handler
-}
-
-// routes is the whole surface this binary exposes to a browser.
-func routes() []route {
-	return []route{
-		{
-			Pattern:  "/api/chat",
-			Methods:  []string{http.MethodPost},
-			Summary:  "Ask the agent a question. Request and response bodies pass through unchanged.",
-			Upstream: "fathom-agent POST /chat",
-			handler:  func(_ *config.Config, h handlers, _ *slog.Logger) http.Handler { return h.chat },
-		},
-		{
-			// Subtree pattern; the trailing slash is what makes /api/eval/runs/7
-			// match. Absent entirely when eval is not configured.
-			Pattern:  "/api/eval/",
-			Methods:  []string{http.MethodGet},
-			Summary:  "Read the eval results database. The /api/eval prefix is stripped before forwarding.",
-			Upstream: "fathom-eval-serve",
-			GatedOn:  "FATHOM_FRONT_EVAL_URL",
-			enabled:  func(h handlers) bool { return h.eval != nil },
-			handler:  func(_ *config.Config, h handlers, _ *slog.Logger) http.Handler { return h.eval },
-		},
-		{
-			Pattern: "/api/features",
-			Methods: []string{http.MethodGet},
-			Summary: "Which server-side gates are open. The page reads this before rendering the view switcher.",
-			handler: func(cfg *config.Config, _ handlers, _ *slog.Logger) http.Handler {
-				return featuresHandler(cfg)
-			},
-		},
-		{
-			Pattern: "/healthz",
-			Methods: []string{http.MethodGet},
-			Summary: "Liveness: this process is up. Never traced.",
-			handler: func(*config.Config, handlers, *slog.Logger) http.Handler {
-				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-					w.WriteHeader(http.StatusOK)
-					fmt.Fprintln(w, "ok")
-				})
-			},
-		},
-		{
-			Pattern:  "/readyz",
-			Methods:  []string{http.MethodGet},
-			Summary:  "Readiness: forwards fathom-agent's /readyz body verbatim. Deliberately ignores eval.url.",
-			Upstream: "fathom-agent GET /readyz",
-			handler: func(cfg *config.Config, _ handlers, log *slog.Logger) http.Handler {
-				return readyHandler(cfg, log)
-			},
-		},
-		{
-			Pattern: "/",
-			Methods: []string{http.MethodGet},
-			Summary: "The chat and eval UI, embedded in the binary.",
-			handler: func(_ *config.Config, h handlers, _ *slog.Logger) http.Handler { return h.ui },
-		},
-	}
-}
-
 // newMux builds the routing table. Split out from serve so it can be tested
 // without a listener -- the eval gate is exactly the kind of wiring that is
 // worth asserting, and serve() had no test at all before it existed.
 func newMux(cfg *config.Config, h handlers, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
-	for _, r := range routes() {
-		if r.enabled != nil && !r.enabled(h) {
-			continue
-		}
-		mux.Handle(r.Pattern, r.handler(cfg, h, log))
+	mux.Handle("/api/chat", h.chat)
+	if h.eval != nil {
+		// Subtree pattern; the trailing slash is what makes /api/eval/runs/7
+		// match. Absent entirely when eval is not configured.
+		mux.Handle("/api/eval/", h.eval)
 	}
+	mux.HandleFunc("/api/features", featuresHandler(cfg))
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "ok")
+	})
+	mux.HandleFunc("/readyz", readyHandler(cfg, log))
+	mux.Handle("/", h.ui)
 	return mux
 }
 

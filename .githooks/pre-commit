@@ -14,6 +14,12 @@
 # being designed out, and "run make contracts and commit again" makes every
 # interface change a two-attempt commit. The trade is that the commit contains
 # files you did not stage by hand, so every one of them is listed below.
+#
+# This is not a cheap hook. The writer runs the services rather than parsing them,
+# so it builds a container image per touched component. Docker's layer cache makes
+# the common case -- a change inside one component, no dependency change -- a few
+# seconds; a cold cache is a minute or more. Scoping to touched components is what
+# keeps that tolerable, and FATHOM_SKIP_CONTRACTS=1 is there for when it is not.
 
 set -euo pipefail
 
@@ -78,6 +84,26 @@ for c in $components; do
 	fi
 done
 
+# No Docker, no regeneration -- and that is a skip, not a failure.
+#
+# This is the one exception to the rule below, and it is about what the developer
+# can do rather than about what is being checked. Every other failure here is
+# fixable in the moment: build the venv, reconcile the two files that disagree. A
+# daemon that is not running is not, and blocking every commit in the repository
+# on Docker being up -- including the docs-only ones that reach this line because
+# they touched a component directory -- trains people into --no-verify, which
+# disables the hook for everything rather than for this.
+#
+# Loud rather than silent, because it does let a stale contract through. `make
+# check` at the root still runs contracts-check, which is where that gets caught.
+if ! docker info >/dev/null 2>&1; then
+	echo "pre-commit: Docker is not available, so contracts cannot be regenerated." >&2
+	echo "            The writer runs the services; there is no fallback that would" >&2
+	echo "            produce the same document." >&2
+	echo "            Run 'make contracts' once Docker is up, and commit the result." >&2
+	exit 0
+fi
+
 echo "pre-commit: regenerating contracts for:$components" >&2
 
 # Deliberately fails the commit rather than skipping. Elsewhere in this repo a
@@ -88,7 +114,8 @@ echo "pre-commit: regenerating contracts for:$components" >&2
 if ! make --no-print-directory contracts COMPONENT="$components" >&2; then
 	echo >&2
 	echo "pre-commit: could not regenerate contracts." >&2
-	echo "  A missing venv?   make -C <component> venv" >&2
+	echo "  A missing venv?   make -C agent venv" >&2
+	echo "  Container failed? the message above carries its last output." >&2
 	echo "  A real drift?     the message above names the two files that disagree." >&2
 	echo "  Not now?          git commit --no-verify" >&2
 	exit 1

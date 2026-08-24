@@ -171,55 +171,16 @@ func (c *Config) ReadyURL() string { return c.AgentURL + "/readyz" }
 // /api/eval/x onto /x is the proxy's StripPrefix, not a string built here.
 func (c *Config) EvalEnabled() bool { return c.EvalURL != "" }
 
-// VarDoc is one environment variable this component reads.
-type VarDoc struct {
-	Name    string `json:"name"`
-	Type    string `json:"type"`
-	Default string `json:"default"`
-}
-
-// declared accumulates a VarDoc per lookup, appended by the helpers below.
-//
-// Recording here rather than in a table beside Load() is the whole point: every
-// variable this component reads goes through one of these four functions, so what
-// is recorded is what is read. A separate table would be a second source of truth
-// and would drift the first time someone added a variable without updating it.
-var declared []VarDoc
-
-// Describe returns the variables Load reads, in declaration order and without
-// duplicates. Meaningful only after Load has run at least once.
-func Describe() []VarDoc {
-	seen := map[string]bool{}
-	out := make([]VarDoc, 0, len(declared))
-	for _, d := range declared {
-		if !seen[d.Name] {
-			seen[d.Name] = true
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-func record(name, typ, def string) {
-	declared = append(declared, VarDoc{Name: envPrefix + name, Type: typ, Default: def})
-}
-
-func lookup(name string) (string, bool) {
-	return os.LookupEnv(envPrefix + name)
-}
-
 func env(name, def string) string {
-	record(name, "string", def)
-	if v, ok := lookup(name); ok {
+	if v, ok := os.LookupEnv(envPrefix + name); ok {
 		return v
 	}
 	return def
 }
 
 func envInt64(name string, def int64) (int64, error) {
-	record(name, "int", strconv.FormatInt(def, 10))
-	raw, ok := lookup(name)
-	if !ok || raw == "" {
+	raw := env(name, "")
+	if raw == "" {
 		return def, nil
 	}
 	v, err := strconv.ParseInt(raw, 10, 64)
@@ -230,9 +191,8 @@ func envInt64(name string, def int64) (int64, error) {
 }
 
 func envDuration(name string, def time.Duration) (time.Duration, error) {
-	record(name, "duration", def.String())
-	raw, ok := lookup(name)
-	if !ok || raw == "" {
+	raw := env(name, "")
+	if raw == "" {
 		return def, nil
 	}
 	v, err := time.ParseDuration(raw)
@@ -243,9 +203,8 @@ func envDuration(name string, def time.Duration) (time.Duration, error) {
 }
 
 func envLevel(name string, def slog.Level) (slog.Level, error) {
-	record(name, "log level", def.String())
-	raw, ok := lookup(name)
-	if !ok || raw == "" {
+	raw := env(name, "")
+	if raw == "" {
 		return def, nil
 	}
 	var l slog.Level

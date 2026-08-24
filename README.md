@@ -141,7 +141,7 @@ rather than a server and `fathom-front` cannot mount the volume from another nam
 |---|---|
 | Language | Python 3.12 |
 | Owns | the fixtures, the rubrics, the judge, and `results.db` |
-| Built on | `httpx`, `aiohttp` (the read service), SQLite |
+| Built on | `httpx`, FastAPI + `uvicorn` (the read service), SQLite |
 | K8s credentials | **yes, and the only *write* ones in the repo** — namespaces, bare Pods, Services, ConfigMaps; `secrets` create/delete without read |
 | Conversation state | none — every question is a fresh `/chat` |
 | Reached at | CronJobs, on a schedule and suspended by default; `fathom-eval-serve` on ClusterIP `:8080`, never a NodePort |
@@ -487,6 +487,13 @@ components a commit touches, so a docs-only commit does nothing. Bypass it once 
 `git config --unset core.hooksPath`. Nothing else in the repo installs it for you:
 pointing `core.hooksPath` into the working tree means a `git pull` can change what runs
 on your machine at commit time, which is a thing to opt into knowingly.
+
+**It needs Docker, and skips without it.** Contracts are produced by *running* each
+service — building its image and scraping the container over the wire — precisely so
+that no component carries code whose only job is to describe itself. Layer-cached that
+is seconds per component; cold it is a minute or more. A hook that blocked every commit
+on a daemon being up would train people into `--no-verify`, which disables it for
+everything, so it says so loudly and exits zero instead.
 
 Whether or not you install it, `make contracts-check` fails on a drifted contract and is
 part of the root `make check`.

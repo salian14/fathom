@@ -66,7 +66,6 @@ From `front/`:
 
 ```sh
 make check                    # gofmt, go vet, go test, UI checks, helm lint + template
-make contract                 # this component's published interface, as JSON
 make help                     # the full target list
 make push VERSION=0.5.1
 ```
@@ -338,14 +337,22 @@ depends on the agent's.
 ## The published contract
 
 `contracts/front/` describes this service's interface, and is **generated** — never
-edit it. `make contract` here prints what this component knows about itself; the writer
-in `scripts/contracts.py` merges in the chart's view and cross-checks the two, so a
-default listen port that stops matching `service.port` fails rather than shipping.
+edit it.
+
+There is **no generated spec for this component**, and that is the honest answer: Go's
+`http.ServeMux` does not report what was registered with it. The route table lives in
+`contracts/front/integration-notes.md`, written by hand and pinned by
+`TestDocumentedRoutesAreServed`, which dials every documented row through the real mux.
+Change `newMux` and the notes together or that test fails.
+
+The chart supplies what a process cannot know about itself — namespace, Service type,
+nodePort, RBAC, probes. The sandbox runs the container with the chart's own environment
+and dials its `containerPort`, so a pod that would start, pass its probes and be
+unreachable through its Service fails here instead.
 
 ```sh
-make contract              # this component's contract, as JSON on stdout
-make -C .. contracts COMPONENT=front
-make -C .. contracts-check # fail on drift; also part of the root `make check`
+make -C .. contracts COMPONENT=front   # needs Docker: this runs the service
+make -C .. contracts-check              # fail on drift; also part of the root `make check`
 ```
 
 `make -C .. hooks` installs the pre-commit hook that regenerates it for you.

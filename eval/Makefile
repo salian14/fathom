@@ -5,7 +5,7 @@
 # without knowing which language is behind it:
 #
 #   help build fmt lint test check image push lint-chart render-chart
-#   contract run-local version clean all
+#   run-local version clean all
 #
 # Anything beyond that list is component-specific and named so: `venv`, `lock`,
 # `lock-check`, `run-judge`, `run-now`, `run-serve` and `db-pull` here; `run-stdio` in mcp;
@@ -70,7 +70,6 @@ help:
 	@echo "  make push           image, then docker push"
 	@echo "  make lint-chart     helm lint + template (skips without helm)"
 	@echo "  make render-chart   helm template to stdout"
-	@echo "  make contract       print this component's contract as JSON"
 	@echo "  make run-local      run an eval against $(AGENT_URL), db $(LOCAL_DB)"
 	@echo "  make run-judge      run the judge pass against $(JUDGE_URL) (component-specific)"
 	@echo "  make run-now        fire the in-cluster CronJob once, now (component-specific)"
@@ -163,15 +162,6 @@ lint-chart:
 .PHONY: render-chart
 render-chart:
 	@helm template $(BINARY) $(CHART)
-
-# Print this component's published interface as one JSON document on stdout, and
-# nothing else -- the writer in scripts/contracts.py parses this, so the venv
-# build below is sent to stderr rather than allowed to corrupt it. Needs no
-# cluster, no judge and no database: the app is built, not served.
-.PHONY: contract
-contract:
-	@$(MAKE) --no-print-directory venv 1>&2
-	@$(PY) -m fathom_eval contract
 
 .PHONY: run-local
 run-local: venv

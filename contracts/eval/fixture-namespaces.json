@@ -1,5 +1,5 @@
 {
-  "layout_version": 1,
+  "layout_version": 2,
   "namespaces": [
     "fathom-eval-cpu-throttle",
     "fathom-eval-crashloop",
@@ -12,5 +12,5 @@
     "fathom-eval-secret-bait",
     "fathom-eval-service-no-endpoints"
   ],
-  "note": "Two-file agreement: these must appear in eval/helm -> rbac.fixtureNamespaces or the harness cannot stage them."
+  "note": "Read out of the packaged fixtures by running the image. Two-file agreement: these must appear in eval/helm -> rbac.fixtureNamespaces or the harness cannot stage them."
 }

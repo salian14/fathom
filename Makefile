@@ -152,33 +152,35 @@ check: contracts-check
 
 # --- contracts ---------------------------------------------------------------
 #
-# contracts/ is generated, never edited. Each component prints its own interface
-# (`make -C <c> contract`), the writer merges in the facts only the chart knows --
-# namespace, Service type, nodePort, RBAC -- and cross-checks the two where they
-# overlap, so a listen port that no longer matches service.port fails here rather
-# than as a pod that starts, passes its own probes and is unreachable.
+# contracts/ is generated, never edited -- and nothing in any component exists to
+# generate it. The writer builds each component's image, starts it in a throwaway
+# container configured the way its own chart configures it, and scrapes it over the
+# wire: FastAPI's own /openapi.json for the agent, a real tools/list for mcp, the
+# applied SQLite schema for eval. It merges in the facts only the chart knows --
+# namespace, Service type, nodePort, RBAC, probes.
 #
-# The pre-commit hook in .githooks/ runs the same writer on the components a
-# commit touches. `contracts-check` is the same thing for anyone who never
-# installs the hook -- which is everyone until they run `make hooks`, and there
-# is no CI here to catch it for them.
+# The container run is also the port check: it dials the chart's own containerPort,
+# so a pod that would start, pass its probes and be unreachable through its Service
+# fails here instead.
 #
-# The writer needs PyYAML, which the system interpreter does not have and `yq`
-# would have solved if it were installed. Both Python components' venvs carry it
-# already, so the first one that exists is used and one is built only if neither
-# does.
-CONTRACT_PY := $(firstword $(wildcard eval/.venv/bin/python agent/.venv/bin/python))
+# This needs Docker, because it runs the services. `contracts-check` is therefore
+# not cheap, and the pre-commit hook in .githooks/ skips it when Docker is not
+# running rather than blocking a commit on a daemon that is not there.
+#
+# The writer needs PyYAML, httpx and the MCP SDK. agent's venv carries all three
+# already, so it is used and built only if it does not exist.
+CONTRACT_PY := $(wildcard agent/.venv/bin/python)
 
 .PHONY: contract-venv
 contract-venv:
 	@if [ -z "$(CONTRACT_PY)" ]; then \
-	  echo "==> no component venv yet; building eval's for PyYAML"; \
-	  $(MAKE) --no-print-directory -C eval venv; \
+	  echo "==> no agent venv yet; building it for PyYAML, httpx and the MCP SDK"; \
+	  $(MAKE) --no-print-directory -C agent venv; \
 	fi
 
 .PHONY: contracts
 contracts: contract-venv
-	@py="$(CONTRACT_PY)"; [ -n "$$py" ] || py=eval/.venv/bin/python; \
+	@py="$(CONTRACT_PY)"; [ -n "$$py" ] || py=agent/.venv/bin/python; \
 	$$py scripts/contracts.py $(COMPONENT)
 
 # Regenerates into a temp tree and diffs, so a drifted contract is reported
@@ -188,7 +190,7 @@ contracts: contract-venv
 # a freshly generated tree, and neither absence is drift.
 .PHONY: contracts-check
 contracts-check: contract-venv
-	@py="$(CONTRACT_PY)"; [ -n "$$py" ] || py=eval/.venv/bin/python; \
+	@py="$(CONTRACT_PY)"; [ -n "$$py" ] || py=agent/.venv/bin/python; \
 	tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
 	$$py scripts/contracts.py --out "$$tmp" $(COMPONENT) || exit 1; \
 	scope="$(COMPONENT)"; rc=0; : >"$$tmp.diff"; \

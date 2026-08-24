@@ -1,25 +1,37 @@
-CREATE TABLE IF NOT EXISTS meta (
+CREATE TABLE checks (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    result_id INTEGER NOT NULL REFERENCES results(id),
+    -- termination | remediation | naming | content | structural | scope, in
+    -- grading.CATEGORY_ORDER's reporting priority.
+    category  TEXT NOT NULL,
+    name      TEXT NOT NULL,
+    passed    INTEGER NOT NULL,
+    detail    TEXT
+);
+
+CREATE TABLE judgements (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    result_id      INTEGER NOT NULL REFERENCES results(id),
+    judge_model    TEXT NOT NULL,
+    rubric_version TEXT NOT NULL,
+    verdict        TEXT,
+    score          INTEGER,
+    -- Scored separately from `score` rather than folded into it: a confident, well
+    -- evidenced diagnosis with a useless fix and the reverse are different failures,
+    -- and averaging them into one number hides which one happened.
+    remediation_score INTEGER,
+    rationale      TEXT,
+    raw_json       TEXT,
+    error          TEXT,
+    created_at     TEXT NOT NULL
+);
+
+CREATE TABLE meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS runs (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at       TEXT NOT NULL,
-    finished_at      TEXT,
-    -- running | ok | failed | abandoned. 'abandoned' is written by the sweep below,
-    -- never by the run itself -- a process that is killed cannot record its own death.
-    status           TEXT NOT NULL,
-    git_sha          TEXT,
-    harness_version  TEXT,
-    agent_url        TEXT,
-    agent_model      TEXT,
-    iterations       INTEGER,
-    host             TEXT,
-    note             TEXT
-);
-
-CREATE TABLE IF NOT EXISTS results (
+CREATE TABLE results (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id          INTEGER NOT NULL REFERENCES runs(id),
     fixture         TEXT NOT NULL,
@@ -52,40 +64,33 @@ CREATE TABLE IF NOT EXISTS results (
     created_at      TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS checks (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    result_id INTEGER NOT NULL REFERENCES results(id),
-    -- termination | remediation | naming | content | structural | scope, in
-    -- grading.CATEGORY_ORDER's reporting priority.
-    category  TEXT NOT NULL,
-    name      TEXT NOT NULL,
-    passed    INTEGER NOT NULL,
-    detail    TEXT
+CREATE TABLE runs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at       TEXT NOT NULL,
+    finished_at      TEXT,
+    -- running | ok | failed | abandoned. 'abandoned' is written by the sweep below,
+    -- never by the run itself -- a process that is killed cannot record its own death.
+    status           TEXT NOT NULL,
+    git_sha          TEXT,
+    harness_version  TEXT,
+    agent_url        TEXT,
+    agent_model      TEXT,
+    iterations       INTEGER,
+    host             TEXT,
+    note             TEXT
 );
 
-CREATE TABLE IF NOT EXISTS judgements (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    result_id      INTEGER NOT NULL REFERENCES results(id),
-    judge_model    TEXT NOT NULL,
-    rubric_version TEXT NOT NULL,
-    verdict        TEXT,
-    score          INTEGER,
-    -- Scored separately from `score` rather than folded into it: a confident, well
-    -- evidenced diagnosis with a useless fix and the reverse are different failures,
-    -- and averaging them into one number hides which one happened.
-    remediation_score INTEGER,
-    rationale      TEXT,
-    raw_json       TEXT,
-    error          TEXT,
-    created_at     TEXT NOT NULL
-);
+CREATE TABLE sqlite_sequence(name,seq);
 
-CREATE INDEX IF NOT EXISTS idx_results_run     ON results(run_id);
-CREATE INDEX IF NOT EXISTS idx_results_fixture ON results(fixture, question_id);
-CREATE INDEX IF NOT EXISTS idx_checks_result   ON checks(result_id);
-CREATE INDEX IF NOT EXISTS idx_checks_name     ON checks(name);
-CREATE INDEX IF NOT EXISTS idx_checks_category ON checks(category, passed);
--- The judge finds its work through this: results with no judgement at the current
--- rubric version. Without the index that is a scan of every result ever recorded.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_judge_unique
+CREATE INDEX idx_checks_category ON checks(category, passed);
+
+CREATE INDEX idx_checks_name     ON checks(name);
+
+CREATE INDEX idx_checks_result   ON checks(result_id);
+
+CREATE UNIQUE INDEX idx_judge_unique
     ON judgements(result_id, rubric_version);
+
+CREATE INDEX idx_results_fixture ON results(fixture, question_id);
+
+CREATE INDEX idx_results_run     ON results(run_id);

@@ -365,82 +365,16 @@ def test_chat_response_model_drops_nothing(client, monkeypatch):
     assert set(body["steps"][0]) == {"tool", "args", "result_chars", "status"}
 
 
-def test_the_published_spec_describes_every_route():
-    """The contract is generated from app.openapi(), so an undocumented route is an
-    absence in the spec rather than a visible bug. Assert the shape the writer in
-    scripts/contracts.py depends on."""
-    from fathom_agent.contract import build
+def test_the_openapi_spec_describes_every_route():
+    """`contracts/agent/openapi.json` is scraped from a running container's
+    `/openapi.json`, so an undocumented route is an absence in the published
+    contract rather than a visible bug. This asserts the shape the scraper
+    depends on, without a second copy of it anywhere in the service."""
+    spec = api.create_app(load()).openapi()
 
-    doc = build()
-    spec = doc["openapi"]
-
-    assert doc["service"] == "fathom-agent"
     assert sorted(spec["paths"]) == ["/chat", "/healthz", "/readyz"]
     # A body schema, not a bare 200. This is the gap response_model closed.
     ok = spec["paths"]["/chat"]["post"]["responses"]["200"]
     assert ok["content"]["application/json"]["schema"]["$ref"].endswith("/ChatResponse")
     # Every failure a caller has to handle is declared.
     assert {"400", "422", "502", "504"} <= set(spec["paths"]["/chat"]["post"]["responses"])
-
-
-def test_the_contract_is_byte_stable():
-    """Regenerating without changing anything must produce identical bytes, or every
-    commit becomes a contract commit and people stop reading the diff."""
-    import json
-
-    from fathom_agent.contract import build
-
-    first = json.dumps(build(), indent=2, sort_keys=True)
-    second = json.dumps(build(), indent=2, sort_keys=True)
-    assert first == second
-
-
-def test_declared_metric_attributes_are_what_is_recorded():
-    """The telemetry contract's attribute keys are the one thing in contracts/ that
-    cannot be read off a live provider -- keys are chosen at record time, not at
-    instrument creation -- so the declaration is hand-written and worth exactly as
-    much as this test.
-
-    It is also the rule conventions.md prohibition 4 exists for: anything from the
-    question or the answer added to this stream multiplies the time series, and that
-    change looks harmless in review. It fails here instead."""
-    from opentelemetry import metrics
-    from opentelemetry.sdk.metrics import MeterProvider
-    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-
-    from fathom_agent.contract import build
-
-    reader = InMemoryMetricReader()
-    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
-
-    class _Span:
-        def set_attribute(self, *args):
-            pass
-
-        def record_exception(self, *args):
-            pass
-
-    api._record_turn(_Span(), "ok", 0.0)
-
-    observed: set[str] = set()
-    found = False
-    for rm in reader.get_metrics_data().resource_metrics:
-        for sm in rm.scope_metrics:
-            for metric in sm.metrics:
-                if metric.name != "fathom.chat.turn.duration":
-                    continue
-                found = True
-                for point in metric.data.data_points:
-                    observed |= set(point.attributes or {})
-    assert found, "the turn histogram was never recorded"
-
-    declared = {
-        key
-        for instrument in build()["telemetry"]["instruments"]
-        if instrument["name"] == "fathom.chat.turn.duration"
-        for key in instrument["attributes"]
-    }
-    assert observed == declared, (
-        f"recorded {sorted(observed)} but declared {sorted(declared)}. If a new key is "
-        f"not a closed set, it belongs on the span rather than on this histogram."
-    )

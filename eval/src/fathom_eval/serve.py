@@ -17,260 +17,262 @@ Two rules the routes follow:
 - **A missing database is not an error.** A cluster whose CronJob has never run is a
   correct state of the system and renders as an empty view. `/readyz` therefore reports
   on the mount, not on the data.
+
+## Why FastAPI here and not aiohttp
+
+This was aiohttp until 2026-08-23, chosen because the kubernetes client already pulls it
+and FastAPI would add starlette, uvicorn and pydantic to a batch image for six read-only
+routes. That reasoning was sound about image weight and wrong about what this component
+is: it is the only pure JSON API in the repo, its responses are consumed across a
+namespace boundary by `front/internal/web/static/evals.js`, and aiohttp publishes no
+machine-readable description of any of it.
+
+FastAPI publishes `/openapi.json` itself, which `scripts/contracts.py` scrapes from a
+running container exactly as it does for `fathom-agent` -- so `contracts/eval/openapi.json`
+costs this service no describe-myself code at all. That is the trade: three wheels in the
+image, in exchange for the response contract being generated rather than hand-written
+prose that drifts from `evals.js` with nothing to notice.
+
+**The response models below must never narrow a payload.** They exist to publish the
+envelope, not to filter it. Every one carries `extra="allow"`, and
+`test_response_models_drop_nothing` drives a real request and asserts that what
+`reporting` produced is what the client receives -- because a `response_model` that
+silently deletes a field is invisible in the spec, which would simply stop mentioning it.
+The row objects inside each envelope are `dict[str, Any]` on purpose: they are SQL
+projections, and restating their columns here would be the second source of truth this
+repo keeps avoiding.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sqlite3
-from collections.abc import Callable
-from typing import Any
+from typing import Annotated, Any
 
-from aiohttp import web
+import uvicorn
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, PlainTextResponse
+from pydantic import BaseModel, ConfigDict, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import reporting
 from .config import Config
 
 log = logging.getLogger(__name__)
 
-# Probes produce no spans anywhere in Fathom. The aiohttp instrumentation reads this
-# through OTEL_PYTHON_AIOHTTP_SERVER_EXCLUDED_URLS, which _instrument sets rather than
-# leaving to the chart -- the exclusion is a property of the code, not of a deployment.
+# Probes produce no spans anywhere in Fathom. Passed to the instrumentor at construction
+# rather than left to the chart -- the exclusion is a property of the code, not of a
+# deployment. Spelled the same way fathom-agent spells it, deliberately.
 UNTRACED = "healthz,readyz"
 
 
-def _json(payload: Any, status: int = 200) -> web.Response:
-    return web.json_response(
-        payload,
-        status=status,
-        dumps=lambda o: json.dumps(o, default=str),
-        # Unversioned data that changes nightly, read by a page that is itself no-store.
-        headers={"Cache-Control": "no-store"},
-    )
+# --- the published envelopes -----------------------------------------------------
+#
+# Optional-but-required-together is what discriminates the two 200 shapes each list
+# route can return: a normal payload always carries `limit`, and an empty-database
+# payload always carries `empty` and `reason`. Keeping those required in their own
+# models is what lets the union resolve without a discriminator field.
 
 
-def _error(message: str, status: int) -> web.Response:
-    # The same {"error": ...} envelope fathom-agent and fathom-front's proxy use, so the
-    # browser has one shape to parse rather than one per failure origin.
+class Error(BaseModel):
+    """The one error envelope. `evals.js` parses this for every failing status, and so
+    do fathom-agent and fathom-front's proxy -- one shape per client, not one per
+    failure origin."""
+
+    error: str
+
+
+class EmptyState(BaseModel):
+    """No results database yet.
+
+    **A 200, not a 404 and not a 503.** A cluster whose CronJob has never run is a
+    correct state of the system and renders as an empty view; a client that treats this
+    as an outage shows a red banner on every fresh install.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    empty: bool
+    reason: str
+    runs: list[dict[str, Any]] = Field(default_factory=list)
+    results: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class Meta(BaseModel):
+    """What database this service is reading and what it will serve."""
+
+    model_config = ConfigDict(extra="allow")
+
+    # Path, presence, size and mtime. Present even when the file is not.
+    database: dict[str, Any]
+    # The ceiling this service applies to any `limit`, silently.
+    max_rows: int
+    # Absent until there is a database to read it from.
+    schema_version: int | None = None
+
+
+class RunList(BaseModel):
+    """The eval runs, newest first."""
+
+    model_config = ConfigDict(extra="allow")
+
+    runs: list[dict[str, Any]]
+    limit: int
+    offset: int
+    total: int
+
+
+class RunDetail(BaseModel):
+    """One run, its per-fixture and per-check summaries, and a page of its results."""
+
+    model_config = ConfigDict(extra="allow")
+
+    run: dict[str, Any]
+    fixtures: list[dict[str, Any]]
+    checks: list[dict[str, Any]]
+    # grading.CATEGORY_ORDER: the reporting priority the UI renders checks in.
+    category_order: list[str]
+    # Every rubric version present in this run, most recently written first.
+    rubric_versions: list[str]
+    # The one being reported, from ?rubric or the newest. Null when nothing was judged.
+    rubric: str | None = None
+    results: list[dict[str, Any]]
+    limit: int
+    offset: int
+    total: int
+
+
+class ResultDetail(BaseModel):
+    """One result in full -- the only endpoint carrying free text.
+
+    The rows inside stay open on purpose. `result` is a `results` row (`SELECT *`) plus
+    the decoded `steps` and `remediation`, and `json_errors` when a stored JSON column
+    failed to parse -- its presence is the signal, and the row is still served, because
+    a bad column should not hide the result. Those columns are the database's to declare
+    and `schema.sql` is where they are published.
+
+    **`raw_json` is deliberately absent** from the judgements here: it is the judge
+    model's unparsed reply, and it is not part of this interface.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    result: dict[str, Any]
+    run: dict[str, Any]
+    checks: list[dict[str, Any]]
+    # grading.CATEGORY_ORDER: the reporting priority the UI renders checks in.
+    category_order: list[str]
+    judgements: list[dict[str, Any]]
+
+
+# --- helpers ---------------------------------------------------------------------
+
+
+def _json(payload: Any, status: int = 200) -> JSONResponse:
+    return JSONResponse(payload, status_code=status)
+
+
+def _error(message: str, status: int) -> JSONResponse:
     return _json({"error": message}, status)
 
 
-def _int_param(request: web.Request, name: str, default: int, ceiling: int | None = None) -> int:
-    raw = request.query.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        value = int(raw)
-    except ValueError as err:
-        raise web.HTTPBadRequest(text=f"{name} must be an integer, got {raw!r}") from err
-    if value < 0:
-        raise web.HTTPBadRequest(text=f"{name} must not be negative, got {value}")
-    return min(value, ceiling) if ceiling is not None else value
+def _capped(value: int | None, default: int, ceiling: int) -> int:
+    """Apply the row ceiling. Validation itself is FastAPI's job -- see below.
 
-
-def _path_id(request: web.Request, name: str) -> int:
-    raw = request.match_info[name]
-    if not raw.isdigit():
-        raise web.HTTPBadRequest(text=f"{name} must be an integer, got {raw!r}")
-    return int(raw)
-
-
-def _with_db(cfg: Config, handler: Callable[[web.Request, sqlite3.Connection], Any]):
-    """Open the database per request, hand it to the handler, always close it.
-
-    Per request rather than once at startup: SQLite connections are not thread-safe
-    across threads, opening costs microseconds, and -- the argument that settles it --
-    re-checking on every request means the view starts working the moment the first run
-    lands, with no pod restart.
+    The cap is silent by design: a client asking for more than `serve_max_rows` gets the
+    cap rather than an error, so `total` is the only honest way to learn how many rows
+    exist.
     """
-
-    async def wrapped(request: web.Request) -> web.Response:
-        try:
-            conn = reporting.connect_ro(cfg.db_path)
-        except reporting.MissingDatabase:
-            # Not an error. Nothing has run yet, which is the normal state of a fresh
-            # install, and it should render as an empty view rather than a red banner.
-            return _json(
-                {
-                    "empty": True,
-                    "reason": f"no results database yet at {cfg.db_path}",
-                    "runs": [],
-                    "results": [],
-                }
-            )
-        except reporting.UnreadableDatabase as err:
-            log.warning("results database unreadable: %s", err)
-            return _error(f"results database unreadable: {err}", 503)
-        try:
-            reporting.check_schema(conn)
-            return await handler(request, conn)
-        except reporting.SchemaTooNew as err:
-            return _error(str(err), 503)
-        finally:
-            conn.close()
-
-    return wrapped
+    return min(default if value is None else value, ceiling)
 
 
-# --- the published contract -----------------------------------------------------
-#
-# aiohttp's router knows every path and method registered on it, so the generated
-# spec takes those from the app itself and never restates them. What the router
-# cannot know is the shape of what comes back: these handlers build dicts straight
-# out of SQL rows, so there is no model to introspect the way FastAPI has one in
-# fathom-agent.
-#
-# The response shapes therefore live here, next to the handlers that produce them,
-# and `test_every_route_is_described` fails if a route is added without one. That
-# test is the whole reason this is safe to publish -- a hand-written schema with no
-# guard is exactly the second source of truth this repo keeps avoiding.
-RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
-    "/healthz": {
-        "summary": "Liveness: this process is up. Never traced.",
-        "media_type": "text/plain",
-        "responses": {"200": {"description": "ok"}},
-    },
-    "/readyz": {
-        "summary": "Readiness: /data is mounted and readable.",
-        "media_type": "text/plain",
-        "responses": {
-            "200": {
-                "description": "ok, and whether a database is present yet. An absent "
-                "database is a correct state, not a failure -- it renders as an empty view."
-            },
-            "503": {"description": "The data directory is not mounted, or not readable."},
-        },
-    },
-    "/meta": {
-        "summary": "What database this service is reading and what it will serve.",
-        "responses": {
-            "200": {
-                "description": "Present even when there is no database yet.",
-                "schema": {
-                    "type": "object",
-                    "required": ["database", "max_rows"],
-                    "properties": {
-                        "database": {
-                            "type": "object",
-                            "description": "Path, presence and size of results.db.",
-                        },
-                        "max_rows": {
-                            "type": "integer",
-                            "description": "The cap this service applies to any limit.",
-                        },
-                        "schema_version": {
-                            "type": "integer",
-                            "description": "Absent when there is no database. A version "
-                            "newer than the reader's is a 503, not a best-effort read.",
-                        },
-                    },
-                },
-            }
-        },
-    },
-    "/runs": {
-        "summary": "The eval runs, newest first.",
-        "query": {
-            "limit": {"type": "integer", "default": 50, "description": "Capped at max_rows."},
-            "offset": {"type": "integer", "default": 0},
-        },
-        "responses": {
-            "200": {
-                "description": "An absent database is 200 with empty:true, not an error.",
-                "schema": {
-                    "type": "object",
-                    "required": ["runs", "limit", "offset", "total"],
-                    "properties": {
-                        "runs": {"type": "array", "items": {"type": "object"}},
-                        "limit": {"type": "integer"},
-                        "offset": {"type": "integer"},
-                        "total": {"type": "integer"},
-                        "empty": {"type": "boolean"},
-                        "reason": {"type": "string"},
-                    },
-                },
-            },
-            "503": {"description": "Database unreadable, or written by a newer harness."},
-        },
-    },
-    "/runs/{id}": {
-        "summary": "One run: its totals, its fixtures, its checks and its results.",
-        "query": {
-            "rubric": {"type": "string", "description": "Defaults to the newest version present."},
-            "fixture": {"type": "string"},
-            "outcome": {"type": "string"},
-            "order": {
-                "type": "string",
-                "enum": ["natural", "interesting"],
-                "default": "natural",
-            },
-            "limit": {"type": "integer", "description": "Defaults to and is capped at max_rows."},
-            "offset": {"type": "integer", "default": 0},
-        },
-        "responses": {
-            "200": {
-                "description": "The run and everything needed to render it in one request.",
-                "schema": {
-                    "type": "object",
-                    "required": ["run", "fixtures", "checks", "results"],
-                    "properties": {
-                        "run": {"type": "object"},
-                        "fixtures": {"type": "array", "items": {"type": "object"}},
-                        "checks": {"type": "array", "items": {"type": "object"}},
-                        "category_order": {"type": "array", "items": {"type": "string"}},
-                        "rubric_versions": {"type": "array", "items": {"type": "string"}},
-                        "rubric": {"type": ["string", "null"]},
-                        "results": {"type": "array", "items": {"type": "object"}},
-                        "limit": {"type": "integer"},
-                        "offset": {"type": "integer"},
-                        "total": {"type": "integer"},
-                    },
-                },
-            },
-            "404": {"description": "No such run."},
-        },
-    },
-    "/results/{id}": {
-        "summary": "One graded answer, in full.",
-        # Said out loud because it is why this service is ClusterIP and must stay
-        # that way: the stored answer is returned verbatim, planted canary included.
-        "description": "The only endpoint that returns free text -- the agent's answer, "
-        "the question and the judge's rationale. `results.answer` is verbatim, which "
-        "includes the canary the secret-bait fixture plants. This is why the service is "
-        "ClusterIP and unauthenticated rather than exposed.",
-        "responses": {
-            "200": {
-                "description": "The results row, with steps, remediation and checks decoded.",
-                "schema": {"type": "object"},
-            },
-            "404": {"description": "No such result."},
-        },
-    },
-}
+# Validated by FastAPI rather than by hand, which is what keeps the published spec
+# honest: the parameter is typed `integer` with `minimum: 0` because that is what is
+# enforced, and the 422 the spec declares is one that can actually happen. The handler
+# in build_app translates it into this service's `{"error": ...}` envelope, so a client
+# still parses one shape for every failing status -- see evals.js.
+Rows = Annotated[int | None, Query(ge=0, description="Silently capped at meta.max_rows.")]
+Offset = Annotated[int | None, Query(ge=0)]
 
 
-def build_app(cfg: Config) -> web.Application:
-    app = web.Application()
+def build_app(cfg: Config) -> FastAPI:
+    app = FastAPI(
+        title="fathom-eval-serve",
+        summary="A read-only HTTP view of the eval results database.",
+    )
+    app.state.cfg = cfg
 
-    async def healthz(_: web.Request) -> web.Response:
-        return web.Response(text="ok\n")
+    # --- the {"error": ...} envelope on every failure path -----------------------
+    #
+    # Starlette's defaults are `{"detail": ...}` for an HTTPException and an HTML page
+    # for an unhandled one. `evals.js` parses one envelope for every status it sees, so
+    # these translate rather than letting two shapes reach it.
 
-    async def readyz(_: web.Request) -> web.Response:
+    # Registered on Starlette's HTTPException, not FastAPI's subclass: a 404 for an
+    # unknown path and a 405 for a wrong method are raised by the router itself, and a
+    # handler bound to the subclass would never see them.
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        if exc.status_code == 405:
+            return _error("only GET is accepted here", 405)
+        if exc.status_code == 404 and exc.detail == "Not Found":
+            return _error(f"no such path: {request.url.path}", 404)
+        return _error(str(exc.detail), exc.status_code)
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        """FastAPI's own 422 body is `{"detail": [...]}`. This service answers with the
+        one envelope every other status uses, so `evals.js` parses one shape."""
+        first = exc.errors()[0] if exc.errors() else {}
+        where = ".".join(str(p) for p in first.get("loc", ())[1:]) or "request"
+        return _error(f"{where}: {first.get('msg', 'invalid')}", 422)
+
+    @app.exception_handler(sqlite3.Error)
+    async def _sqlite_error(request: Request, exc: sqlite3.Error) -> JSONResponse:
+        log.exception("query failed")
+        return _error(f"query failed: {exc}", 500)
+
+    @app.middleware("http")
+    async def _no_store(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    # --- probes ------------------------------------------------------------------
+
+    @app.get(
+        "/healthz",
+        response_class=PlainTextResponse,
+        summary="Liveness: this process is up. Never traced.",
+    )
+    async def healthz() -> str:
+        return "ok\n"
+
+    @app.get(
+        "/readyz",
+        response_class=PlainTextResponse,
+        summary="Readiness: /data is mounted and readable.",
+        responses={503: {"description": "The data directory is not mounted, or not readable."}},
+    )
+    async def readyz():
         # Reports on the mount, not the data. A database that does not exist yet is a
         # correct state; a /data that is not there is a deploy fault and should keep this
         # pod out of its Service.
         info = reporting.database_info(cfg.db_path)
         directory = os.path.dirname(cfg.db_path) or "."
         if not os.path.isdir(directory):
-            return web.Response(status=503, text=f"{directory} is not mounted\n")
+            return PlainTextResponse(f"{directory} is not mounted\n", status_code=503)
         if not os.access(directory, os.R_OK):
-            return web.Response(status=503, text=f"{directory} is not readable\n")
+            return PlainTextResponse(f"{directory} is not readable\n", status_code=503)
         state = "database present" if info["present"] else "no database yet"
-        return web.Response(text=f"ok ({state})\n")
+        return PlainTextResponse(f"ok ({state})\n")
 
-    async def meta(_: web.Request) -> web.Response:
+    # --- data --------------------------------------------------------------------
+
+    @app.get("/meta", summary="What database this service is reading and what it will serve.")
+    async def meta() -> Meta:
         info = reporting.database_info(cfg.db_path)
         payload: dict[str, Any] = {"database": info, "max_rows": cfg.serve_max_rows}
         if info["present"]:
@@ -279,103 +281,192 @@ def build_app(cfg: Config) -> web.Application:
                 payload["schema_version"] = reporting.schema_version(conn)
             finally:
                 conn.close()
-        return _json(payload)
+        return Meta(**payload)
 
-    async def runs(request: web.Request, conn: sqlite3.Connection) -> web.Response:
-        return _json(
-            reporting.list_runs(
-                conn,
-                limit=_int_param(request, "limit", 50, cfg.serve_max_rows),
-                offset=_int_param(request, "offset", 0),
-            )
+    @app.get(
+        "/runs",
+        response_model=RunList | EmptyState,
+        summary="The eval runs, newest first.",
+        responses=_DATA_RESPONSES,
+    )
+    async def runs(
+        conn: DbConn,
+        limit: Rows = None,
+        offset: Offset = None,
+    ):
+        if conn is None:
+            return _empty(cfg)
+        return reporting.list_runs(
+            conn,
+            limit=_capped(limit, 50, cfg.serve_max_rows),
+            offset=offset or 0,
         )
 
-    async def run_detail(request: web.Request, conn: sqlite3.Connection) -> web.Response:
-        run_id = _path_id(request, "id")
+    @app.get(
+        "/runs/{id}",
+        response_model=RunDetail | EmptyState,
+        summary="One run, with its fixture and check summaries and a page of results.",
+        responses={**_DATA_RESPONSES, 404: {"model": Error, "description": "No such run."}},
+    )
+    async def run_detail(
+        id: int,
+        conn: DbConn,
+        rubric: Annotated[str | None, Query(description="Defaults to the newest.")] = None,
+        fixture: str | None = None,
+        outcome: str | None = None,
+        order: Annotated[str, Query(description='"natural" or "interesting".')] = "natural",
+        limit: Rows = None,
+        offset: Offset = None,
+    ):
+        if conn is None:
+            return _empty(cfg)
+        run_id = id
         run = reporting.get_run(conn, run_id)
         if run is None:
-            return _error(f"no run {run_id}", 404)
+            raise HTTPException(status_code=404, detail=f"no run {run_id}")
         versions = reporting.rubric_versions(conn, run_id)
-        rubric = request.query.get("rubric") or (versions[0] if versions else None)
+        chosen = rubric or (versions[0] if versions else None)
         listing = reporting.list_results(
             conn,
             run_id,
-            fixture=request.query.get("fixture"),
-            outcome=request.query.get("outcome"),
-            order=request.query.get("order", "natural"),
-            rubric=rubric,
-            limit=_int_param(request, "limit", cfg.serve_max_rows, cfg.serve_max_rows),
-            offset=_int_param(request, "offset", 0),
+            fixture=fixture,
+            outcome=outcome,
+            order=order,
+            rubric=chosen,
+            limit=_capped(limit, cfg.serve_max_rows, cfg.serve_max_rows),
+            offset=offset or 0,
         )
-        return _json(
-            {
-                "run": run,
-                "fixtures": reporting.fixture_summary(conn, run_id),
-                "checks": reporting.check_summary(conn, run_id),
-                "category_order": list(reporting.CATEGORY_ORDER),
-                "rubric_versions": versions,
-                "rubric": rubric,
-                **listing,
-            }
-        )
+        return {
+            "run": run,
+            "fixtures": reporting.fixture_summary(conn, run_id),
+            "checks": reporting.check_summary(conn, run_id),
+            "category_order": list(reporting.CATEGORY_ORDER),
+            "rubric_versions": versions,
+            "rubric": chosen,
+            **listing,
+        }
 
-    async def result_detail(request: web.Request, conn: sqlite3.Connection) -> web.Response:
-        result_id = _path_id(request, "id")
+    @app.get(
+        "/results/{id}",
+        response_model=ResultDetail | EmptyState,
+        summary="One result in full. The only endpoint carrying free text.",
+        responses={**_DATA_RESPONSES, 404: {"model": Error, "description": "No such result."}},
+    )
+    async def result_detail(
+        id: int,
+        conn: DbConn,
+    ):
+        if conn is None:
+            return _empty(cfg)
+        result_id = id
         detail = reporting.get_result(conn, result_id)
         if detail is None:
-            return _error(f"no result {result_id}", 404)
-        return _json(detail)
+            raise HTTPException(status_code=404, detail=f"no result {result_id}")
+        return detail
 
-    app.router.add_get("/healthz", healthz)
-    app.router.add_get("/readyz", readyz)
-    app.router.add_get("/meta", meta)
-    app.router.add_get("/runs", _with_db(cfg, runs))
-    app.router.add_get("/runs/{id}", _with_db(cfg, run_detail))
-    app.router.add_get("/results/{id}", _with_db(cfg, result_detail))
-
-    @web.middleware
-    async def envelope(request: web.Request, handler):
-        """Turn aiohttp's own HTML error pages into the JSON envelope the UI parses."""
-        try:
-            return await handler(request)
-        except web.HTTPException as exc:
-            if exc.status == 405:
-                return _error("only GET is accepted here", 405)
-            if exc.status == 404:
-                return _error(f"no such path: {request.path}", 404)
-            return _error(exc.text or exc.reason, exc.status)
-        except sqlite3.Error as err:
-            log.exception("query failed")
-            return _error(f"query failed: {err}", 500)
-
-    app.middlewares.append(envelope)
     return app
+
+
+# Shared by the three data routes. Declared once so the three cannot drift apart.
+_DATA_RESPONSES: dict[int | str, dict[str, Any]] = {
+    422: {
+        "model": Error,
+        "description": "A query or path parameter did not validate. "
+        "Carries this service's {\"error\": ...} envelope, not FastAPI's default "
+        '{"detail": [...]}.',
+    },
+    503: {
+        "model": Error,
+        "description": "The database is unreadable, or its schema is newer than this "
+        "reader's. A schema-too-new 503 will not resolve on retry: roll the reader "
+        "forward. Best-effort parsing would report wrong numbers, which is worse than "
+        "reporting nothing.",
+    },
+}
+
+
+def _empty(cfg: Config) -> dict[str, Any]:
+    return {
+        "empty": True,
+        "reason": f"no results database yet at {cfg.db_path}",
+        "runs": [],
+        "results": [],
+    }
+
+
+async def _db(request: Request):
+    """Open the database per request, hand it to the route, always close it.
+
+    Per request rather than once at startup: SQLite connections are not thread-safe
+    across threads, opening costs microseconds, and -- the argument that settles it --
+    re-checking on every request means the view starts working the moment the first run
+    lands, with no pod restart.
+
+    Yields None rather than raising when there is no database, because that is the empty
+    state above and not a failure.
+
+    Reads its config off `app.state` rather than closing over it. It has to be a plain
+    module-level function: this module uses postponed annotations, so a route's
+    `Depends(...)` marker is evaluated as a string in module scope, where a closure
+    variable does not exist -- and FastAPI then silently treats the parameter as a query
+    parameter and answers 422 to every request.
+
+    **`async def`, and that is load-bearing.** A sync dependency is run in a threadpool,
+    so the connection would be opened in one thread and used by the route handler in
+    another -- which SQLite refuses outright ("objects created in a thread can only be
+    used in that same thread"). Async keeps the open, the queries and the close on the
+    event loop thread, which is the same single-threaded model the aiohttp version had.
+    The blocking reads stay on the loop for the same reason they did there: they are
+    local file reads bounded by `serve_max_rows`, not network calls.
+    """
+    cfg: Config = request.app.state.cfg
+    try:
+        conn = reporting.connect_ro(cfg.db_path)
+    except reporting.MissingDatabase:
+        yield None
+        return
+    except reporting.UnreadableDatabase as err:
+        log.warning("results database unreadable: %s", err)
+        raise HTTPException(status_code=503, detail=f"results database unreadable: {err}") from err
+    try:
+        reporting.check_schema(conn)
+    except reporting.SchemaTooNew as err:
+        conn.close()
+        raise HTTPException(status_code=503, detail=str(err)) from err
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+# `Any` rather than `sqlite3.Connection | None`: the value is supplied by the dependency
+# and never validated, and naming a non-pydantic type here only invites a schema build.
+DbConn = Annotated[Any, Depends(_db)]
 
 
 def serve(cfg: Config) -> int:
     """Run the read service until SIGTERM."""
-    _instrument()
     app = build_app(cfg)
+    _instrument(app)
     host, _, port = cfg.serve_addr.rpartition(":")
     log.info("serving results from %s on %s", cfg.db_path, cfg.serve_addr)
-    # run_app installs its own SIGTERM/SIGINT handling and drains in-flight requests
+    # uvicorn installs its own SIGTERM/SIGINT handling and drains in-flight requests
     # before returning, which is what lets telemetry.shutdown() in __main__ flush the
     # span batch instead of being SIGKILLed with it still queued.
-    web.run_app(app, host=host or None, port=int(port), print=None, access_log=None)
+    uvicorn.run(app, host=host or "0.0.0.0", port=int(port), log_config=None, access_log=False)
     return 0
 
 
-def _instrument() -> None:
+def _instrument(app: FastAPI) -> None:
     """Wrap the inbound HTTP boundary once, at construction.
 
-    Auto-instrumentation rather than hand-rolled spans, per the repo's telemetry rules.
-    Degrades to no-op if the package is absent so a missing optional dependency cannot
-    stop the service from serving.
+    Auto-instrumentation rather than hand-rolled spans, per the repo's telemetry rules,
+    and the same call fathom-agent makes. Degrades to no-op if the package is absent so
+    a missing optional dependency cannot stop the service from serving.
     """
-    os.environ.setdefault("OTEL_PYTHON_AIOHTTP_SERVER_EXCLUDED_URLS", UNTRACED)
     try:
-        from opentelemetry.instrumentation.aiohttp_server import AioHttpServerInstrumentor
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
     except ImportError:  # pragma: no cover - exercised only on a partial install
-        log.warning("aiohttp server instrumentation unavailable; serving untraced")
+        log.warning("fastapi instrumentation unavailable; serving untraced")
         return
-    AioHttpServerInstrumentor().instrument()
+    FastAPIInstrumentor.instrument_app(app, excluded_urls=UNTRACED)

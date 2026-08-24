@@ -1,32 +1,6 @@
 {
   "component": "mcp",
-  "defaults": {
-    "addr": ":8080",
-    "allowed_namespaces": null,
-    "allowed_resources": [
-      "pods",
-      "services",
-      "nodes",
-      "namespaces",
-      "events",
-      "configmaps",
-      "persistentvolumeclaims",
-      "serviceaccounts",
-      "endpoints",
-      "replicationcontrollers",
-      "deployments.apps",
-      "replicasets.apps",
-      "statefulsets.apps",
-      "daemonsets.apps",
-      "jobs.batch",
-      "cronjobs.batch",
-      "ingresses.networking.k8s.io",
-      "networkpolicies.networking.k8s.io"
-    ],
-    "request_timeout": "30s"
-  },
-  "depends_on": [],
-  "layout_version": 1,
+  "layout_version": 2,
   "listen_port": 8080,
   "namespaces": [
     "fathom"
