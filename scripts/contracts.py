@@ -58,6 +58,24 @@ Two environment overrides are applied to the chart's env, and only two:
     reachable is ever configured: the sandbox must not be able to touch a real
     cluster, and this is what guarantees it.
 
+## Without Docker
+
+`make contracts` passes `--allow-offline` and then degrades rather than refusing.
+`service.json` is rendered by `helm template` and never needed a daemon. `agent` and
+`eval` are started from their own venvs instead of their images and scraped through the
+same `/openapi.json` -- FastAPI serves it either way, and the spec is built from the
+routes and models in the source, which is what both the image and the venv install. The
+two are therefore byte-identical between the modes, and that is load-bearing: the
+pre-commit hook uses this path, so a document that differed by mode would poison the
+next `make check` on every commit made offline.
+
+What offline cannot do is run a Go binary, so `mcp-tools.json` is left as it is, and
+neither Go component gets its containerPort dialled. Those files are never deleted --
+a stale one that says so on stderr is recoverable, an absent one reads as a removed
+interface. `contracts-check` does not accept the flag at all: it is the drift gate
+inside `make check`, and a gate that silently checks less than it claims is worse than
+one that refuses.
+
 Runs on the agent venv's interpreter, which already carries the three things needed
 here -- PyYAML, httpx and the MCP SDK -- so this adds no dependency to anything.
 """
@@ -69,11 +87,14 @@ import asyncio
 import contextlib
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +117,22 @@ RELEASE = {
     "agent": "fathom-agent",
     "front": "fathom-front",
     "eval": "fathom-eval",
+}
+
+# The module each Python component runs as, for the offline path below. Only the
+# two FastAPI services have one: `mcp` and `front` are Go binaries, and building
+# them is not meaningfully cheaper than building their images.
+LOCAL_MODULE = {
+    "agent": "fathom_agent",
+    "eval": "fathom_eval",
+}
+
+# The variable each component reads its listen address from. `eval` is the odd one
+# out because its image is a CLI with several subcommands and only one of them
+# listens, so the address belongs to the subcommand rather than the process.
+ADDR_ENV = {
+    "agent": "FATHOM_AGENT_ADDR",
+    "eval": "FATHOM_EVAL_SERVE_ADDR",
 }
 
 # The version of the layout this writer produces.
@@ -458,8 +495,26 @@ def sandbox(component: str, image: str, facts: dict[str, Any], extra_env: dict[s
     run(cmd)
 
     base = f"http://127.0.0.1:{host_port}"
+
+    def tail() -> str:
+        logs = subprocess.run(
+            ["docker", "logs", "--tail", "40", name],
+            capture_output=True, text=True,
+        )
+        return logs.stdout + logs.stderr
+
     try:
-        await_listener(component, name, base, facts)
+        await_listener(
+            component, base, facts,
+            alive=lambda: container_running(name),
+            tail=tail,
+            hint=(
+                f"The chart sets FATHOM_{component.upper()}_ADDR and containerPort {port} "
+                f"from the same value in {component}/helm; if the process is listening "
+                f"somewhere else, one of them is wrong and the pod would start, pass its "
+                f"probes and be unreachable through its Service."
+            ),
+        )
         yield base
     finally:
         subprocess.run(
@@ -472,25 +527,112 @@ def sandbox(component: str, image: str, facts: dict[str, Any], extra_env: dict[s
                 kubeconfig.parent.rmdir()
 
 
-def await_listener(component: str, name: str, base: str, facts: dict[str, Any]) -> None:
-    """Block until the container answers its own liveness path.
+def venv_python(component: str) -> Path | None:
+    """The component's own interpreter, or None if it has not been built yet."""
+    python = REPO / component / ".venv" / "bin" / "python"
+    return python if python.exists() else None
+
+
+@contextlib.contextmanager
+def local_sandbox(component: str, facts: dict[str, Any], python: Path):
+    """Start the component from its own venv and yield its base URL.
+
+    The offline counterpart of sandbox(), and it exists for one reason: FastAPI serves
+    /openapi.json itself, so the two Python services can be scraped without a daemon.
+    A pre-commit hook that regenerates nothing when Docker is down lets a stale
+    contract through on every commit made offline, and the spec is the same document
+    either way -- it is built from the routes and models in the source, which is what
+    both the image and the venv install.
+
+    What this gives up is the half of the container run that is not the spec: the
+    chart's containerPort is not dialled. Nothing may be listening on it on a
+    workstation and binding it would collide, so a free loopback port is used instead
+    and the pod-starts-but-is-unreachable check stays a Docker-only assertion.
+    """
+    port = free_port()
+    addr_env = ADDR_ENV[component]
+    env = sandbox_env(component, facts)
+    env[addr_env] = f"127.0.0.1:{port}"
+
+    tmp = Path(tempfile.mkdtemp(prefix=f"fathom-contract-{component}-"))
+    if component == "eval":
+        # The chart points at /data, which the container run satisfies with a tmpfs
+        # and nothing satisfies here.
+        env["FATHOM_EVAL_DB_PATH"] = str(tmp / "results.db")
+
+    # A deliberately minimal inherited environment. A FATHOM_* override or an OTEL_*
+    # endpoint that happens to be exported in someone's shell would change what the
+    # process serves and therefore what gets published, and a contract that depends
+    # on whose terminal produced it is not a contract.
+    inherited = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG", "LC_ALL")}
+    inherited["TMPDIR"] = str(tmp)
+
+    # The chart's args, for the same reason the container run takes them: `eval`
+    # serves the read API only when handed `serve`, and reading that from the chart
+    # rather than special-casing it means the next component to need one is handled.
+    args = list((facts["serving_container"] or {}).get("args") or [])
+
+    log = tmp / "output.log"
+    handle = log.open("wb")
+    proc = subprocess.Popen(
+        [str(python), "-m", LOCAL_MODULE[component], *args],
+        cwd=REPO / component,
+        env={**inherited, **env},
+        stdout=handle,
+        stderr=subprocess.STDOUT,
+    )
+
+    base = f"http://127.0.0.1:{port}"
+    try:
+        await_listener(
+            component, base, facts,
+            alive=lambda: proc.poll() is None,
+            tail=lambda: log.read_text(errors="replace")[-4000:],
+            hint=(
+                f"`python -m {LOCAL_MODULE[component]}` was started from "
+                f"{component}/.venv with {addr_env}={env[addr_env]}. If the venv is "
+                f"out of step with requirements.lock, `make -C {component} venv` "
+                f"rebuilds it."
+            ),
+        )
+        yield base
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=10)
+        handle.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def await_listener(
+    component: str,
+    base: str,
+    facts: dict[str, Any],
+    alive: Callable[[], bool],
+    tail: Callable[[], str],
+    hint: str,
+) -> None:
+    """Block until the process under test answers its own liveness path.
 
     Liveness, never readiness: `/readyz` means "my dependencies answered", and in the
-    sandbox they deliberately cannot. `/healthz` means the process is up and listening
-    where the chart said it would, which is the whole assertion.
+    sandbox they deliberately cannot. `/healthz` means the process is up and listening,
+    which is the whole assertion.
+
+    Both sandboxes share this loop, and differ only in how "still alive", "last output"
+    and "what it means when nothing answered" are spelled -- which is exactly the three
+    arguments.
     """
     path = facts["probes"].get("liveness") or "/healthz"
     deadline = time.monotonic() + STARTUP_TIMEOUT
     last: Exception | None = None
     while time.monotonic() < deadline:
-        if not container_running(name):
-            logs = subprocess.run(
-                ["docker", "logs", "--tail", "40", name],
-                capture_output=True, text=True,
-            )
+        if not alive():
             raise Drift(
-                f"{component}: the container exited before it listened. Its last output:\n"
-                f"{logs.stdout}{logs.stderr}"
+                f"{component}: it exited before it listened. Its last output:\n{tail()}"
             )
         try:
             response = httpx.get(base + path, timeout=2.0)
@@ -500,13 +642,8 @@ def await_listener(component: str, name: str, base: str, facts: dict[str, Any]) 
             last = err
         time.sleep(0.4)
 
-    port = listen_port(facts)
     raise Drift(
-        f"{component}: nothing answered {path} on port {port} within "
-        f"{STARTUP_TIMEOUT:.0f}s. The chart sets FATHOM_{component.upper()}_ADDR and "
-        f"containerPort from the same value in {component}/helm; if the process is "
-        f"listening somewhere else, one of them is wrong and the pod would start, "
-        f"pass its probes and be unreachable through its Service. "
+        f"{component}: nothing answered {path} within {STARTUP_TIMEOUT:.0f}s. {hint} "
         f"Last error: {last}"
     )
 
@@ -566,12 +703,16 @@ def scrape_mcp(base: str, path: str) -> tuple[str | None, list[dict[str, Any]]]:
     return asyncio.run(_mcp_session(base + path))
 
 
-def scrape_eval_storage(image: str) -> tuple[dict[str, Any], str, list[str]]:
-    """Read the results schema back out of a database the image builds for itself.
+def scrape_eval_storage(run_python: Callable[[str], str]) -> tuple[dict[str, Any], str, list[str]]:
+    """Read the results schema back out of a database `fathom_eval` builds for itself.
 
     Running the store rather than reading `store.SCHEMA` is the difference between
     publishing what the DDL says and publishing what the DDL plus every migration
     leaves behind -- and the migrations are the half that drifts.
+
+    How the script is executed is the caller's business -- `python` inside the image,
+    or the eval venv's interpreter when there is no daemon. The script itself is one
+    copy, because two would be two answers.
     """
     script = """
 import json, sqlite3, tempfile, pathlib
@@ -595,8 +736,7 @@ print(json.dumps({
     "fixture_namespaces": sorted({f.namespace for f in fixtures.load_all()}),
 }))
 """
-    out = run(["docker", "run", "--rm", "--cap-drop", "ALL", "--entrypoint", "python", image, "-c", script])
-    payload = json.loads(out)
+    payload = json.loads(run_python(script))
     return (
         {"engine": "sqlite", "schema_version": payload["schema_version"]},
         payload["ddl"],
@@ -634,18 +774,44 @@ def service_document(component: str, facts: dict[str, Any]) -> dict:
     }
 
 
-def write_component(component: str, root: Path) -> list[Path]:
-    facts = chart_facts(component)
-    cross_check(component, facts)
+@contextlib.contextmanager
+def serving(component: str, facts: dict[str, Any], image: str | None, python: Path | None):
+    """Whichever sandbox this run has, yielding the base URL to scrape."""
+    if image is not None:
+        with sandbox(component, image, facts, {}) as base:
+            yield base
+    else:
+        assert python is not None
+        with local_sandbox(component, facts, python) as base:
+            yield base
 
-    out = root / component
-    written = [out / "service.json"]
-    dump(out / "service.json", service_document(component, facts))
 
-    image = build_image(component)
+def python_runner(image: str | None, python: Path | None, component: str) -> Callable[[str], str]:
+    """How to run a throwaway Python script against this component's dependencies."""
+    if image is not None:
+        return lambda script: run(
+            ["docker", "run", "--rm", "--cap-drop", "ALL", "--entrypoint", "python", image, "-c", script]
+        )
+    assert python is not None
+    return lambda script: run([str(python), "-c", script], cwd=REPO / component)
+
+
+def scrape_interface(
+    component: str,
+    facts: dict[str, Any],
+    out: Path,
+    image: str | None,
+    python: Path | None,
+) -> list[Path]:
+    """Write everything that comes from the component rather than from its chart."""
+    # The two Go components are only ever reached with an image; write_component does
+    # not offer them the offline path, because there is nothing to serve their
+    # interface from without building the binary.
+    assert component in LOCAL_MODULE or image is not None
+    written: list[Path] = []
 
     if component == "agent":
-        with sandbox(component, image, facts, {}) as base:
+        with serving(component, facts, image, python) as base:
             spec = scrape_openapi(base)
         spec.setdefault("info", {})["version"] = chart_version(component)
         dump(out / "openapi.json", spec)
@@ -691,13 +857,13 @@ def write_component(component: str, root: Path) -> list[Path]:
             pass
 
     elif component == "eval":
-        with sandbox(component, image, facts, {}) as base:
+        with serving(component, facts, image, python) as base:
             spec = scrape_openapi(base)
         spec.setdefault("info", {})["version"] = chart_version(component)
         dump(out / "openapi.json", spec)
         written.append(out / "openapi.json")
 
-        storage, ddl, namespaces = scrape_eval_storage(image)
+        storage, ddl, namespaces = scrape_eval_storage(python_runner(image, python, component))
         dump(
             out / "storage.json",
             {
@@ -725,6 +891,39 @@ def write_component(component: str, root: Path) -> list[Path]:
         )
         written.append(out / "fixture-namespaces.json")
 
+    return written
+
+
+def write_component(component: str, root: Path, offline: bool = False) -> list[Path]:
+    facts = chart_facts(component)
+    cross_check(component, facts)
+
+    out = root / component
+    written = [out / "service.json"]
+    dump(out / "service.json", service_document(component, facts))
+
+    # service.json is rendered by `helm template` and needs nothing running, so it is
+    # current in either mode. The interface itself is scraped from the component, and
+    # without a daemon that is only possible for the two FastAPI services. What cannot
+    # be regenerated is left alone rather than deleted: a stale file that says so on
+    # stderr is recoverable, and an absent one looks like a removed interface.
+    if not offline:
+        written += scrape_interface(component, facts, out, build_image(component), None)
+    elif component not in LOCAL_MODULE:
+        print(
+            f"contracts: {component}: interface left as it was -- it is scraped from a "
+            f"running binary and that needs Docker.",
+            file=sys.stderr,
+        )
+    elif (python := venv_python(component)) is None:
+        print(
+            f"contracts: {component}: interface left as it was -- no venv to serve it "
+            f"from. Build one with `make -C {component} venv`.",
+            file=sys.stderr,
+        )
+    else:
+        written += scrape_interface(component, facts, out, None, python)
+
     # Created once, then never touched. It holds the retry, idempotency and ordering
     # semantics a spec cannot express -- the part that causes incidents when it is
     # missing -- and overwriting it would silently destroy the most valuable content
@@ -742,6 +941,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Regenerate contracts/ by running the components.")
     parser.add_argument("components", nargs="*", default=None, help="components to regenerate (default: all)")
     parser.add_argument("--out", default=None, help="write here instead of contracts/ (used by contracts-check)")
+    parser.add_argument(
+        "--allow-offline",
+        action="store_true",
+        help="degrade instead of failing when Docker is unavailable (used by `make contracts`)",
+    )
     args = parser.parse_args()
 
     wanted = args.components or COMPONENTS
@@ -749,11 +953,23 @@ def main() -> int:
     if unknown:
         raise SystemExit(f"contracts: unknown component(s): {', '.join(unknown)}")
 
-    if subprocess.run(["docker", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+    offline = subprocess.run(
+        ["docker", "info"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    ).returncode != 0
+    if offline and not args.allow_offline:
         raise SystemExit(
             "contracts: Docker is not available, and this writer runs the components "
-            "rather than parsing them -- there is no fallback that would produce the "
-            "same document. Start Docker and try again."
+            "rather than parsing them. `make contracts` degrades to the two FastAPI "
+            "services and regenerates what it can; a check cannot, because a gate that "
+            "silently checks less than it claims is worse than one that refuses. Start "
+            "Docker and try again."
+        )
+    if offline:
+        print(
+            "contracts: Docker is not available. FastAPI publishes /openapi.json itself, "
+            "so agent and eval are served from their own venvs and scraped the same way; "
+            "anything that needs a running binary is left as it is and named below.",
+            file=sys.stderr,
         )
 
     root = Path(args.out).resolve() if args.out else CONTRACTS
@@ -761,7 +977,7 @@ def main() -> int:
 
     for component in [c for c in COMPONENTS if c in wanted]:
         try:
-            written = write_component(component, root)
+            written = write_component(component, root, offline)
         except Drift as err:
             print(f"contracts: {err}", file=sys.stderr)
             return 1

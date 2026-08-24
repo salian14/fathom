@@ -132,8 +132,13 @@ container configured the way its own chart configures it, and scrapes it over th
 the applied SQLite schema read out of `sqlite_master` for `eval`. `helm template` supplies what a process
 cannot know about itself: namespace, Service type, nodePort, RBAC, probes. The sandbox
 dials the chart's own `containerPort`, so a pod that would start, pass its probes and
-be unreachable through its Service fails here instead. **This needs Docker**, and there
-is no fallback that produces the same document.
+be unreachable through its Service fails here instead. **This needs Docker** — with one
+carve-out. FastAPI publishes `/openapi.json` itself, so `make contracts` falls back to
+serving `agent` and `eval` from their own venvs when no daemon is there, scraped through
+the identical path and byte-identical as a result; `mcp`'s tool surface and both port
+checks need a container and are left as they were, named on stderr. `contracts-check`
+does not take that path — it is the drift gate, and one that silently checks less than
+it claims is worse than one that refuses.
 
 `front` is the only component with no generated spec, and that is the honest answer:
 Go's `ServeMux` does not report what was registered with it, and it serves a UI plus two

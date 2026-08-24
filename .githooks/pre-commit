@@ -84,24 +84,22 @@ for c in $components; do
 	fi
 done
 
-# No Docker, no regeneration -- and that is a skip, not a failure.
+# Docker being down does not stop this any more, and it does not silently pass
+# either. `make contracts` degrades: service.json comes from `helm template` and
+# never needed a daemon, and FastAPI publishes /openapi.json itself, so agent and
+# eval are served from their own venvs and scraped through the identical path. What
+# it cannot do is run a Go binary, so mcp's tool surface and the two containerPort
+# checks are skipped -- the writer names them on stderr, and `make check` at the
+# root still runs contracts-check, which is where a contract left stale is caught.
 #
-# This is the one exception to the rule below, and it is about what the developer
-# can do rather than about what is being checked. Every other failure here is
-# fixable in the moment: build the venv, reconcile the two files that disagree. A
-# daemon that is not running is not, and blocking every commit in the repository
-# on Docker being up -- including the docs-only ones that reach this line because
-# they touched a component directory -- trains people into --no-verify, which
-# disables the hook for everything rather than for this.
-#
-# Loud rather than silent, because it does let a stale contract through. `make
-# check` at the root still runs contracts-check, which is where that gets caught.
+# Blocking every commit in the repository on the daemon being up -- including the
+# docs-only ones that reach this line because they touched a component directory --
+# trains people into --no-verify, which disables the hook for everything rather
+# than for this.
 if ! docker info >/dev/null 2>&1; then
-	echo "pre-commit: Docker is not available, so contracts cannot be regenerated." >&2
-	echo "            The writer runs the services; there is no fallback that would" >&2
-	echo "            produce the same document." >&2
-	echo "            Run 'make contracts' once Docker is up, and commit the result." >&2
-	exit 0
+	echo "pre-commit: Docker is not available. agent and eval will be scraped from" >&2
+	echo "            their venvs; anything needing a running binary is left as it" >&2
+	echo "            is. Run 'make contracts' once Docker is up to close the gap." >&2
 fi
 
 echo "pre-commit: regenerating contracts for:$components" >&2
@@ -111,6 +109,10 @@ echo "pre-commit: regenerating contracts for:$components" >&2
 # but those targets check something, while this one produces something. A skip
 # here commits a stale contract, which is exactly the failure the hook exists to
 # prevent. Scoping to touched components is what keeps that from being a burden.
+#
+# The offline path has one more way to produce nothing -- a component whose venv has
+# not been built. That is a named skip like the others, not a failure: `make -C
+# <component> venv` is the fix, and it is not a thing to discover mid-commit.
 if ! make --no-print-directory contracts COMPONENT="$components" >&2; then
 	echo >&2
 	echo "pre-commit: could not regenerate contracts." >&2

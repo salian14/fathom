@@ -163,9 +163,13 @@ check: contracts-check
 # so a pod that would start, pass its probes and be unreachable through its Service
 # fails here instead.
 #
-# This needs Docker, because it runs the services. `contracts-check` is therefore
-# not cheap, and the pre-commit hook in .githooks/ skips it when Docker is not
-# running rather than blocking a commit on a daemon that is not there.
+# This needs Docker, because it runs the services -- with one carve-out. FastAPI
+# publishes /openapi.json itself, so `make contracts` can serve agent and eval from
+# their own venvs when no daemon is there and still produce the identical document;
+# `mcp`'s tool surface and the two port checks need a container and are left alone.
+# `contracts-check` deliberately does not take that path: it is the drift gate inside
+# `make check`, and a gate that silently checks less than it claims is worse than one
+# that refuses.
 #
 # The writer needs PyYAML, httpx and the MCP SDK. agent's venv carries all three
 # already, so it is used and built only if it does not exist.
@@ -181,7 +185,7 @@ contract-venv:
 .PHONY: contracts
 contracts: contract-venv
 	@py="$(CONTRACT_PY)"; [ -n "$$py" ] || py=agent/.venv/bin/python; \
-	$$py scripts/contracts.py $(COMPONENT)
+	$$py scripts/contracts.py --allow-offline $(COMPONENT)
 
 # Regenerates into a temp tree and diffs, so a drifted contract is reported
 # without being silently repaired -- `make contracts` is how you repair it.

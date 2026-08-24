@@ -422,9 +422,16 @@ establishing that the process listens anywhere in particular. Verified: misspell
 env var name and move `service.port` off the code default, and the run fails naming the
 port nothing answered on.
 
-**Docker is required**, because this runs the services. There is no fallback that would
-produce the same document, so the writer says so rather than emitting something weaker
-under the same filenames. `.githooks/pre-commit` skips when Docker is not running.
+**Docker is required**, because this runs the services -- except for the half that a
+venv can serve. FastAPI publishes `/openapi.json` itself, so without a daemon
+`make contracts` still regenerates every `service.json` (that is `helm template`) and
+the full `agent` and `eval` sets, by starting them with `python -m` from their own venvs
+and scraping the identical endpoint; the output is byte-identical to the container run.
+`mcp-tools.json` and both `containerPort` checks need a container, so they are named on
+stderr and left alone -- never deleted, since an absent file reads as a removed
+interface. `make contracts-check` refuses the fallback outright: it is the drift gate,
+and one that silently checks less than it claims is worse than one that refuses.
+`.githooks/pre-commit` therefore regenerates what it can rather than skipping outright.
 
 Three rules for a new component or a new interface:
 

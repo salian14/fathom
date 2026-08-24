@@ -742,7 +742,7 @@ and dials its `containerPort`, so a pod that would start, pass its probes and be
 unreachable through its Service fails here instead.
 
 ```sh
-make -C .. contracts COMPONENT=eval   # needs Docker: this runs the service
+make -C .. contracts COMPONENT=eval   # runs the service; without Docker, from .venv
 make -C .. contracts-check              # fail on drift; also part of the root `make check`
 ```
 

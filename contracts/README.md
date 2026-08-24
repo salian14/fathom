@@ -116,14 +116,35 @@ make contracts COMPONENT=agent  # one component
 make contracts-check            # fail if contracts/ has drifted; wired into `make check`
 ```
 
-**This needs Docker**, because it runs the services. There is no fallback that would
-produce the same document, so the writer fails with that message rather than emitting
-something weaker under the same filenames.
+**This needs Docker**, because it runs the services -- with one carve-out, and it is the
+same argument that put the FastAPI services here in the first place. They publish
+`/openapi.json` themselves, and a venv serves it as willingly as a container does. So
+`make contracts` degrades rather than refusing when no daemon is there:
+
+| | Offline |
+|---|---|
+| `service.json` (all four) | regenerated -- it is `helm template`, and never needed a daemon |
+| `agent`, `eval` | regenerated -- started with `python -m` from the component's venv, given the chart's own environment, scraped through the same `/openapi.json`. `eval`'s schema and fixture namespaces come the same way |
+| `mcp-tools.json` | **left as it was** -- a real `tools/list` needs the Go binary running |
+| the `containerPort` checks | **not performed** for `mcp` or `front` |
+
+The two modes produce byte-identical files, and that is load-bearing rather than lucky:
+the spec is built from the routes and models in the source, which is what the image and
+the venv both install from `requirements.lock`. If they ever diverged, every commit made
+offline would poison the next `make check`.
+
+Nothing is ever deleted because it could not be regenerated. A stale file that announces
+itself on stderr is recoverable; an absent one reads as a removed interface.
+
+`make contracts-check` does **not** accept the fallback and still fails without Docker.
+It is the drift gate inside `make check`, and a gate that silently checks less than it
+claims is worse than one that refuses.
 
 `make hooks` installs the checked-in pre-commit hook, which regenerates the components a
-commit touches and includes the result in that commit. It **skips** when Docker is not
-running rather than blocking a commit on a daemon that is not there. Bypass once with
-`git commit --no-verify`, or always with `FATHOM_SKIP_CONTRACTS=1`.
+commit touches and includes the result in that commit. Without Docker it regenerates
+what it can and says what it could not, rather than blocking a commit on a daemon that
+is not there. Bypass once with `git commit --no-verify`, or always with
+`FATHOM_SKIP_CONTRACTS=1`.
 
 ## Two things to know before trusting a diff
 
