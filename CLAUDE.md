@@ -22,8 +22,8 @@ Fathom is an agentic AI system: three services running as workloads inside a loc
 cluster, driving a host-side Ollama model to answer questions about that cluster using read-only
 tools.
 
-- **`agent/`** — Python 3.12, FastAPI + LangGraph. Owns the agent loop and the `POST /chat` API.
-  Holds no Kubernetes credentials at all.
+- **`agent/`** — Python 3.12, FastAPI + LangChain's `create_agent`. Owns the agent loop and the
+  `POST /chat` API. Holds no Kubernetes credentials at all.
 - **`mcp/`** — Go, an MCP server over streamable HTTP. Owns every read-only tool and the only
   service account that can read the cluster.
 - **`front/`** — Go, a two-view UI served from the binary: a chat view with `/api/chat`

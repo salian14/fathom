@@ -261,7 +261,7 @@ for that reason.
 with one: an answer that diagnoses correctly and stops there leaves the reader exactly
 where they started. `fathom-eval` grades it as its own category.
 
-It is produced by a **second, tool-free model call** after the ReAct loop, using
+It is produced by a **second, tool-free model call** after the agent loop, using
 Ollama's structured-output `format` to fill a fixed schema. It is a separate call
 rather than a step in the loop because `format` and tool calling contend for the same
 channel — constraining the loop's output would break the tool calls it exists to make.

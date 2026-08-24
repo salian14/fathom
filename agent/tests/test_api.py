@@ -3,6 +3,11 @@
 The graph is stubbed: these check the wiring around the model, not the model. There
 is no fake Ollama and no fake MCP server -- exercising those is what
 `make run-local` against the real cluster is for.
+
+The one exception is the iteration-ceiling test, which builds a real graph over a
+fake chat model. What it pins -- that blowing the ceiling ends the turn rather than
+raising -- is a property of how create_agent and its middleware are wired, and a
+stubbed graph cannot show it.
 """
 
 from __future__ import annotations
@@ -12,10 +17,19 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import tool
 
 from fathom_agent import api, mcp_client
-from fathom_agent.agent import build_messages, shape_remediation, summarise
+from fathom_agent.agent import (
+    CEILING_ANSWER,
+    build_graph,
+    build_messages,
+    shape_remediation,
+    summarise,
+)
 from fathom_agent.config import load
 
 
@@ -58,8 +72,7 @@ def test_chat_rejects_an_unknown_history_role(client):
 
 def test_chat_returns_the_answer_and_the_tool_trace(client, monkeypatch):
     class FakeGraph:
-        async def ainvoke(self, state, config):
-            assert config["recursion_limit"] == 2 * 8 + 1
+        async def ainvoke(self, state):
             return {
                 "messages": [
                     AIMessage(
@@ -120,7 +133,7 @@ def _stub_shaper(client, reply):
 
 def _answering_graph(monkeypatch, answer="The pod crashloop-app is in CrashLoopBackOff."):
     class FakeGraph:
-        async def ainvoke(self, state, config):
+        async def ainvoke(self, state):
             return {"messages": [AIMessage(answer)]}
 
     monkeypatch.setattr(api, "build_graph", lambda cfg, model, tools: FakeGraph())
@@ -184,7 +197,7 @@ def test_an_unparseable_shaper_reply_is_reported_not_coerced(client, monkeypatch
 @pytest.mark.parametrize(
     "answer",
     [
-        "Sorry, need more steps to process this request.",
+        "The model hit the iteration ceiling (FATHOM_AGENT_MAX_ITERATIONS) before ...",
         "The model stopped while still calling tools, which usually means it hit ...",
         "The model finished without producing an answer. The tool calls it made ...",
     ],
@@ -298,6 +311,62 @@ def test_summarise_skips_an_empty_message_for_an_earlier_answer():
     answer, _ = summarise({"messages": [AIMessage("the real answer"), AIMessage("   ")]})
 
     assert answer == "the real answer"
+
+
+# --- the iteration ceiling -----------------------------------------------------
+
+
+@tool
+def _fake_k8s_get(resource: str) -> str:
+    """List a resource."""
+    return "NAME  READY\nfathom-mcp  1/1"
+
+
+class _NeverConverges(BaseChatModel):
+    """A model that asks for the same tool every turn and never answers."""
+
+    calls: int = 0
+
+    @property
+    def _llm_type(self) -> str:
+        return "never-converges"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.calls += 1
+        message = AIMessage(
+            "",
+            tool_calls=[
+                {"name": "_fake_k8s_get", "args": {"resource": "pods"}, "id": str(self.calls)}
+            ],
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+async def test_the_iteration_ceiling_ends_the_turn_instead_of_raising():
+    """The regression this guards is specific and would be invisible in a stub.
+
+    create_agent compiles with recursion_limit=9_999 and has no remaining_steps, so
+    a model that never converges would run away into a GraphRecursionError -- a 502
+    with no tool trace. build_graph's ModelCallLimitMiddleware is what stops it, and
+    the answer the caller gets has to be ours rather than the middleware's.
+    """
+    cfg = dataclasses.replace(load(), max_iterations=2)
+    model = _NeverConverges()
+
+    result = await build_graph(cfg, model, [_fake_k8s_get]).ainvoke(
+        {"messages": [HumanMessage("why is it down?")]}
+    )
+    answer, steps = summarise(result)
+
+    assert answer == CEILING_ANSWER
+    # max_iterations tool-calling rounds plus the call that could have answered.
+    assert model.calls == cfg.max_iterations + 1
+    assert [step["tool"] for step in steps] == ["_fake_k8s_get"] * model.calls
+    # Every call is paired with its result: the turn ended cleanly, mid-flight.
+    assert all("result_chars" in step for step in steps)
 
 
 # --- tool-result bounding ------------------------------------------------------
