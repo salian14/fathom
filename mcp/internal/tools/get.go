@@ -227,17 +227,165 @@ func cellString(v any) string {
 	}
 }
 
+// noisyMetadata is the bookkeeping the API server keeps on every object for
+// its own benefit: concurrency tokens, identity handles and field-ownership
+// records. None of it says anything about what the object is or how it is
+// doing, and managedFields alone is routinely larger than the spec.
+//
+// What is deliberately absent from this list, because it is state:
+// creationTimestamp (age), generation (compare with status.observedGeneration
+// to see whether a controller has caught up), deletionTimestamp and finalizers
+// (why something is stuck Terminating), labels, and ownerReferences.
+var noisyMetadata = []string{
+	"managedFields",
+	"resourceVersion",
+	"uid",
+	"selfLink",
+	"generateName",
+}
+
+// noisyAnnotations repeat the object inside itself.
+var noisyAnnotations = []string{
+	"kubectl.kubernetes.io/last-applied-configuration",
+}
+
+// noisyOwnerRef trims each owner reference down to what names the owner. The
+// reference itself stays: "which ReplicaSet owns this pod" is how a model walks
+// from a symptom to its cause.
+var noisyOwnerRef = []string{
+	"uid",
+	"blockOwnerDeletion",
+}
+
+// stripNoise removes what costs context and describes nothing, so that the
+// byte cap is spent on spec and status.
+//
+// Beyond metadata it makes exactly two cuts, each a block the cluster wrote
+// rather than the workload's author: the image cache listing on a Node and the
+// injected service account token volume on a Pod. Everything else in spec and
+// status passes through as the API server returned it, because guessing which
+// fields are "defaults" would mean hiding real configuration from the model.
 func stripNoise(obj map[string]any) {
 	md, ok := obj["metadata"].(map[string]any)
 	if !ok {
 		return
 	}
-	delete(md, "managedFields")
+	for _, k := range noisyMetadata {
+		delete(md, k)
+	}
 
 	if ann, ok := md["annotations"].(map[string]any); ok {
-		delete(ann, "kubectl.kubernetes.io/last-applied-configuration")
+		for _, k := range noisyAnnotations {
+			delete(ann, k)
+		}
 		if len(ann) == 0 {
 			delete(md, "annotations")
 		}
 	}
+
+	if owners, ok := md["ownerReferences"].([]any); ok {
+		for _, o := range owners {
+			ref, ok := o.(map[string]any)
+			if !ok {
+				continue
+			}
+			for _, k := range noisyOwnerRef {
+				delete(ref, k)
+			}
+		}
+	}
+
+	// Core-group kinds only: a CRD that happens to be called Pod or Node owes
+	// nothing to these shapes.
+	if obj["apiVersion"] == "v1" {
+		switch obj["kind"] {
+		case "Node":
+			stripNodeImages(obj)
+		case "Pod":
+			stripTokenVolume(obj)
+		}
+	}
+}
+
+// stripNodeImages drops status.images: every image the kubelet has cached,
+// with each of its tags and digests and its size. It is the largest block on a
+// Node, it sits ahead of nodeInfo in the output, and it says what has been
+// pulled at some point -- not what is running, which the pods say.
+func stripNodeImages(node map[string]any) {
+	if status, ok := node["status"].(map[string]any); ok {
+		delete(status, "images")
+	}
+}
+
+// tokenVolumePrefix is the name the ServiceAccount admission controller gives
+// the projected token volume it injects, followed by a random suffix.
+const tokenVolumePrefix = "kube-api-access-"
+
+// stripTokenVolume drops the injected service account token volume and every
+// mount of it. The block is some twenty lines, identical on every pod that
+// has it, and describes the admission controller rather than the workload.
+//
+// A volume is only dropped when it has both the injected name and a projected
+// source, so a volume an author chose to call kube-api-access-something is
+// kept. Mounts are dropped by the names actually removed, never by prefix.
+func stripTokenVolume(pod map[string]any) {
+	spec, ok := pod["spec"].(map[string]any)
+	if !ok {
+		return
+	}
+
+	removed := map[string]bool{}
+	spec["volumes"] = filterMaps(spec["volumes"], func(v map[string]any) bool {
+		name, _ := v["name"].(string)
+		_, projected := v["projected"]
+		if strings.HasPrefix(name, tokenVolumePrefix) && projected {
+			removed[name] = true
+			return false
+		}
+		return true
+	})
+	if spec["volumes"] == nil {
+		delete(spec, "volumes")
+	}
+	if len(removed) == 0 {
+		return
+	}
+
+	for _, field := range []string{"containers", "initContainers", "ephemeralContainers"} {
+		containers, _ := spec[field].([]any)
+		for _, c := range containers {
+			container, ok := c.(map[string]any)
+			if !ok {
+				continue
+			}
+			container["volumeMounts"] = filterMaps(container["volumeMounts"], func(m map[string]any) bool {
+				name, _ := m["name"].(string)
+				return !removed[name]
+			})
+			if container["volumeMounts"] == nil {
+				delete(container, "volumeMounts")
+			}
+		}
+	}
+}
+
+// filterMaps returns the entries of a decoded JSON list for which keep is
+// true, or nil when none are left or v was not a list. Entries that are not
+// objects are kept: this strips what it recognises and nothing else.
+func filterMaps(v any, keep func(map[string]any) bool) any {
+	list, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]any, 0, len(list))
+	for _, item := range list {
+		if m, ok := item.(map[string]any); ok && !keep(m) {
+			continue
+		}
+		out = append(out, item)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

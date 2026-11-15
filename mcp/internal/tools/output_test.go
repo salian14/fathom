@@ -128,9 +128,29 @@ func TestStripNoise(t *testing.T) {
 	  "kind": "Pod",
 	  "metadata": {
 	    "name": "web-0",
+	    "namespace": "prod",
+	    "generateName": "web-",
+	    "uid": "6f1c0f4e-0000-4000-8000-000000000001",
+	    "resourceVersion": "184467",
+	    "selfLink": "/api/v1/namespaces/prod/pods/web-0",
+	    "generation": 4,
+	    "creationTimestamp": "2026-11-01T10:00:00Z",
+	    "deletionTimestamp": "2026-11-15T10:00:00Z",
+	    "finalizers": ["example.com/hold"],
+	    "labels": {"app": "web"},
 	    "managedFields": [{"manager": "kubectl"}],
-	    "annotations": {"kubectl.kubernetes.io/last-applied-configuration": "{...}"}
-	  }
+	    "annotations": {"kubectl.kubernetes.io/last-applied-configuration": "{...}"},
+	    "ownerReferences": [{
+	      "apiVersion": "apps/v1",
+	      "kind": "StatefulSet",
+	      "name": "web",
+	      "uid": "6f1c0f4e-0000-4000-8000-000000000002",
+	      "controller": true,
+	      "blockOwnerDeletion": true
+	    }]
+	  },
+	  "spec": {"nodeName": "node-1"},
+	  "status": {"phase": "Running"}
 	}`)
 
 	var obj map[string]any
@@ -140,13 +160,154 @@ func TestStripNoise(t *testing.T) {
 	stripNoise(obj)
 
 	md := obj["metadata"].(map[string]any)
-	if _, ok := md["managedFields"]; ok {
-		t.Error("managedFields survived stripNoise")
+	for _, k := range []string{"managedFields", "resourceVersion", "uid", "selfLink", "generateName"} {
+		if _, ok := md[k]; ok {
+			t.Errorf("metadata.%s survived stripNoise", k)
+		}
 	}
 	if _, ok := md["annotations"]; ok {
 		t.Error("an annotations map left empty by stripping was kept")
 	}
-	if md["name"] != "web-0" {
-		t.Error("stripNoise removed a field that identifies the object")
+
+	// These are state, not bookkeeping: age, rollout progress, why a delete is
+	// stuck. Losing any of them makes the model blind to a real condition.
+	for _, k := range []string{
+		"name", "namespace", "generation", "creationTimestamp",
+		"deletionTimestamp", "finalizers", "labels",
+	} {
+		if _, ok := md[k]; !ok {
+			t.Errorf("stripNoise removed metadata.%s, which describes the object", k)
+		}
+	}
+
+	owner := md["ownerReferences"].([]any)[0].(map[string]any)
+	for _, k := range []string{"uid", "blockOwnerDeletion"} {
+		if _, ok := owner[k]; ok {
+			t.Errorf("ownerReferences[0].%s survived stripNoise", k)
+		}
+	}
+	if owner["kind"] != "StatefulSet" || owner["name"] != "web" || owner["controller"] != true {
+		t.Errorf("stripNoise damaged the owner reference: %v", owner)
+	}
+
+	if obj["spec"].(map[string]any)["nodeName"] != "node-1" ||
+		obj["status"].(map[string]any)["phase"] != "Running" {
+		t.Error("stripNoise touched spec or status")
+	}
+}
+
+func TestStripNoiseKeepsOtherAnnotations(t *testing.T) {
+	obj := map[string]any{"metadata": map[string]any{"annotations": map[string]any{
+		"kubectl.kubernetes.io/last-applied-configuration": "{...}",
+		"deployment.kubernetes.io/revision":                "7",
+	}}}
+	stripNoise(obj)
+
+	ann := obj["metadata"].(map[string]any)["annotations"].(map[string]any)
+	if len(ann) != 1 || ann["deployment.kubernetes.io/revision"] != "7" {
+		t.Errorf("annotations = %v, want only the revision", ann)
+	}
+}
+
+func decode(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		t.Fatal(err)
+	}
+	return obj
+}
+
+func TestStripNoiseDropsNodeImages(t *testing.T) {
+	node := decode(t, `{
+	  "apiVersion": "v1", "kind": "Node",
+	  "metadata": {"name": "node-1"},
+	  "status": {
+	    "conditions": [{"type": "Ready", "status": "True"}],
+	    "images": [{"names": ["registry.k8s.io/pause:3.9"], "sizeBytes": 322000}],
+	    "nodeInfo": {"kubeletVersion": "v1.31.0"}
+	  }
+	}`)
+	stripNoise(node)
+
+	status := node["status"].(map[string]any)
+	if _, ok := status["images"]; ok {
+		t.Error("status.images survived on a Node")
+	}
+	if _, ok := status["conditions"]; !ok {
+		t.Error("stripNoise removed the Node's conditions")
+	}
+	if _, ok := status["nodeInfo"]; !ok {
+		t.Error("stripNoise removed the Node's nodeInfo")
+	}
+}
+
+func TestStripNoiseDropsInjectedTokenVolume(t *testing.T) {
+	pod := decode(t, `{
+	  "apiVersion": "v1", "kind": "Pod",
+	  "metadata": {"name": "web-0"},
+	  "spec": {
+	    "volumes": [
+	      {"name": "data", "persistentVolumeClaim": {"claimName": "data-web-0"}},
+	      {"name": "kube-api-access-x7k2p", "projected": {"sources": [{"serviceAccountToken": {"path": "token"}}]}},
+	      {"name": "kube-api-access-mine", "emptyDir": {}}
+	    ],
+	    "initContainers": [{
+	      "name": "init",
+	      "volumeMounts": [{"name": "kube-api-access-x7k2p", "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount"}]
+	    }],
+	    "containers": [{
+	      "name": "web",
+	      "volumeMounts": [
+	        {"name": "data", "mountPath": "/data"},
+	        {"name": "kube-api-access-x7k2p", "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount"},
+	        {"name": "kube-api-access-mine", "mountPath": "/scratch"}
+	      ]
+	    }]
+	  }
+	}`)
+	stripNoise(pod)
+
+	out, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+
+	if strings.Contains(got, "kube-api-access-x7k2p") {
+		t.Errorf("the injected token volume or a mount of it survived:\n%s", got)
+	}
+	// Same prefix, not a projected volume: someone named it, so it is theirs.
+	if strings.Count(got, "kube-api-access-mine") != 2 {
+		t.Errorf("an author's own volume was stripped for sharing the prefix:\n%s", got)
+	}
+	if strings.Count(got, `"data"`) != 2 {
+		t.Errorf("an unrelated volume or mount was stripped:\n%s", got)
+	}
+
+	init := pod["spec"].(map[string]any)["initContainers"].([]any)[0].(map[string]any)
+	if _, ok := init["volumeMounts"]; ok {
+		t.Error("a volumeMounts list left empty by stripping was kept")
+	}
+}
+
+func TestStripNoiseLeavesOtherKindsAlone(t *testing.T) {
+	// A custom resource named Pod, and a core kind that is neither: the two
+	// spec/status cuts are for v1 Pod and v1 Node and nothing else.
+	for _, raw := range []string{
+		`{"apiVersion": "example.com/v1", "kind": "Pod",
+		  "spec": {"volumes": [{"name": "kube-api-access-abcde", "projected": {}}]}}`,
+		`{"apiVersion": "example.com/v1", "kind": "Node", "status": {"images": ["a"]}}`,
+		`{"apiVersion": "v1", "kind": "ConfigMap", "status": {"images": ["a"]}}`,
+	} {
+		before := decode(t, raw)
+		after := decode(t, raw)
+		stripNoise(after)
+
+		want, _ := json.Marshal(before)
+		got, _ := json.Marshal(after)
+		if string(got) != string(want) {
+			t.Errorf("stripNoise changed an object it should not recognise:\n got %s\nwant %s", got, want)
+		}
 	}
 }
