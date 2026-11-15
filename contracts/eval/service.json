@@ -123,7 +123,7 @@
     {
       "container_ports": [],
       "images": [
-        "registry.lab:5000/fathom-eval:0.5.4"
+        "ghcr.io/salian14/fathom-eval:0.5.4"
       ],
       "kind": "CronJob",
       "name": "fathom-eval",
@@ -133,7 +133,7 @@
     {
       "container_ports": [],
       "images": [
-        "registry.lab:5000/fathom-eval:0.5.4"
+        "ghcr.io/salian14/fathom-eval:0.5.4"
       ],
       "kind": "CronJob",
       "name": "fathom-eval-judge",
@@ -145,7 +145,7 @@
         8080
       ],
       "images": [
-        "registry.lab:5000/fathom-eval:0.5.4"
+        "ghcr.io/salian14/fathom-eval:0.5.4"
       ],
       "kind": "Deployment",
       "name": "fathom-eval-serve"

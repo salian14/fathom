@@ -1,0 +1,100 @@
+# Fathom's Argo CD Applications for the spellcore k8s lab.
+#
+# This file is the whole deployment mechanism. Registering it is the one
+# `kubectl apply` anybody makes by hand, once per lab build:
+#
+#   kubectl --context spellcore-k8s-lab -n argocd apply -f deploy/applications.yaml
+#
+# From then on a commit to `bifrost` is the deployment: Argo CD polls the
+# repository every 60 seconds and makes the `fathom` namespace match it. See
+# docs/deploy.md, and the lab's application developer contract it follows.
+#
+# One Application per chart, named <namespace>-<component> as the contract asks
+# (5.1). Three rather than one because each component is its own chart with its
+# own values; Argo CD renders each with `helm template`, using the Application
+# name as the release name, which is what the charts' fullname helpers expect.
+#
+# There is no ordering between them and none is needed. Each service dials the
+# one before it (front -> agent -> mcp) and reports not-ready until that answers,
+# so they converge on their own; sync waves do not span Applications anyway.
+#
+# fathom-eval is deliberately absent. It needs a second namespace, a ClusterRole
+# that creates and deletes namespaces, and a PriorityClass -- all of which the
+# contract (4.1, 4.3) makes a request to the lab owner, not something to sync.
+#
+# Every Application creates the namespace if it is missing, so the three can be
+# applied in any order and any one can be registered alone.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fathom-mcp
+  namespace: argocd
+  finalizers:
+    # Deleting the Application removes what it deployed.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/salian14/fathom.git
+    targetRevision: bifrost
+    # Renders a ClusterRole and ClusterRoleBinding: fathom-mcp's read-only view
+    # of the cluster, which is the product. Cluster-scoped, so it needed the lab
+    # owner's approval under contract 4.3 -- granted 2026-11-15.
+    path: mcp/helm
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: fathom
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fathom-agent
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/salian14/fathom.git
+    targetRevision: bifrost
+    path: agent/helm
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: fathom
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fathom-front
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/salian14/fathom.git
+    targetRevision: bifrost
+    # Renders the VirtualService that attaches the UI to istio-ingress/lab-gateway
+    # under /fathom/ -- http://192.168.56.10:30880/fathom/ from the workstation.
+    path: front/helm
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: fathom
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

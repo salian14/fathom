@@ -19,7 +19,7 @@ SHELL    := /bin/bash
 .NOTPARALLEL:
 
 BINARY   := fathom-agent
-REGISTRY ?= registry.lab:5000
+REGISTRY ?= ghcr.io/salian14
 IMAGE    ?= $(REGISTRY)/$(BINARY)
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 CHART    := helm
@@ -53,7 +53,7 @@ help:
 	@echo "  make clean          remove the venv and caches"
 	@echo "  make all            check, then build"
 	@echo
-	@echo "Knobs:  VERSION=x.y.z  REGISTRY=<host:port>  IMAGE=<ref>  LOCAL_PORT=$(LOCAL_PORT)"
+	@echo "Knobs:  VERSION=x.y.z  REGISTRY=<host/owner>  IMAGE=<ref>  LOCAL_PORT=$(LOCAL_PORT)"
 	@echo "        OLLAMA_URL=<url>  MCP_URL=<url>"
 	@echo
 	@echo "Version: $(VERSION)"

@@ -1,0 +1,31 @@
+{{- if .Values.gateway.enabled }}
+{{- /*
+  The lab owns the gateway; a tenant brings only the route (lab contract 6).
+  One prefix match, rewritten to /, so the pod serves the same paths it does on
+  a port-forward. `mesh` is deliberately absent from gateways: a wildcard host is
+  invalid for in-mesh routing, and in-cluster callers use the Service directly.
+*/}}
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ include "fathom-front.fullname" . }}
+  namespace: {{ include "fathom-front.namespace" . }}
+  labels:
+    {{- include "fathom-front.labels" . | nindent 4 }}
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - {{ .Values.gateway.name }}
+  http:
+    - match:
+        - uri:
+            prefix: {{ .Values.gateway.prefix }}
+      rewrite:
+        uri: /
+      route:
+        - destination:
+            host: {{ include "fathom-front.fullname" . }}
+            port:
+              number: {{ .Values.service.port }}
+{{- end }}

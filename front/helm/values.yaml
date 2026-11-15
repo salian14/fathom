@@ -1,12 +1,15 @@
 namespace:
   name: fathom
-  # False by default: the fathom-mcp chart already creates this namespace, and two
-  # releases both owning a Namespace object collide on install.
+  # False: Argo CD creates the namespace (CreateNamespace=true on the Applications
+  # in deploy/applications.yaml). No chart renders it.
   create: false
 
 replicaCount: 1
 image:
-  repository: registry.lab:5000/fathom-front
+  # Public, because the lab contract (5.3) has tenants pull from outside the lab:
+  # an image that lives there survives a lab rebuild. The tag stays empty so the
+  # chart's appVersion pins it -- a version bump committed to git is the deploy.
+  repository: ghcr.io/salian14/fathom-front
   tag: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
@@ -14,15 +17,26 @@ nameOverride: ""
 fullnameOverride: ""
 
 service:
-  # NodePort for the same reason the agent uses one: the nodes share the
-  # 192.168.56.0/24 libvirt network with the workstation, so http://<node-ip>:<nodePort>
-  # opens the UI with no tunnel. ClusterIP plus a port-forward works too.
-  type: NodePort
+  # ClusterIP: the browser reaches the UI through the lab's shared ingress
+  # gateway (see `gateway` below), not a NodePort.
+  type: ClusterIP
   port: 8080
-  # 30080 is fathom-agent's. Pinned rather than left to the API server so the
-  # bookmark survives a reinstall; must be inside service-node-port-range,
-  # 30000-32767 by default. Set to null to let k8s pick.
-  nodePort: 30081
+  # Only read when type is NodePort (or LoadBalancer), which the lab needs
+  # approval for. Null lets the API server assign one.
+  nodePort: null
+
+gateway:
+  # Renders a VirtualService that attaches this Service to the lab's shared Istio
+  # gateway, so the UI is at http://192.168.56.10:30880/fathom/ from the
+  # workstation. Off, nothing is rendered and the chart needs no Istio CRDs --
+  # reach the Service with a port-forward instead.
+  enabled: true
+  # Platform-owned, and the only gateway a tenant may name (lab contract 6.1).
+  name: istio-ingress/lab-gateway
+  # Must be /<namespace>/ (lab contract 6.2): there is no DNS, so tenants share
+  # host * and are told apart by path. The prefix is rewritten to / before the
+  # request reaches the pod, which is why the page uses relative URLs only.
+  prefix: /fathom/
 
 serviceAccount:
   create: true
@@ -32,7 +46,7 @@ serviceAccount:
 agent:
   # The agent's ClusterIP Service. The browser never dials this -- it reaches
   # /api/chat on this pod, which forwards here -- which is why the agent needs
-  # no CORS configuration and could drop its own NodePort entirely.
+  # no CORS configuration and no exposure of its own.
   #
   # Base URL only: /chat and /readyz are the agent's API, not deployment knobs.
   url: http://fathom-agent.fathom.svc.cluster.local:8080

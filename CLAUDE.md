@@ -102,23 +102,20 @@ agent/         Python agent — src/fathom_agent/, tests/, Dockerfile, helm/
 mcp/           Go MCP server — cmd/, internal/, Dockerfile, helm/
 front/         Go chat UI — cmd/, internal/ (assets embedded), Dockerfile, helm/
 eval/          Python eval harness — src/fathom_eval/ (fixtures + rubrics packaged), helm/
+deploy/        applications.yaml — the Argo CD Applications that deploy the lab
 contracts/     GENERATED — each service's published interface. Never edit; `make contracts`
 scripts/       contracts.py, the writer behind `make contracts`
 .githooks/     the opt-in pre-commit hook; install with `make hooks`
 ```
 
 There is no top-level `helm/`. The charts are `agent/helm`, `mcp/helm`, `front/helm` and
-`eval/helm`; `mcp/helm` creates the `fathom` namespace and `agent`/`front` do not, because two
-releases owning one Namespace object collide on install. `eval/helm` creates its own
-`fathom-eval` namespace, which is a different object and so does not collide.
+`eval/helm`. None of the three charts in the `fathom` namespace creates it — Argo CD does
+(`CreateNamespace=true`). `eval/helm` creates its own `fathom-eval` namespace.
 
-The top-level `Makefile` cuts one version across all four at once (`make release BUMP=patch`).
-A component joins it by appending to `COMPONENTS` and `CHARTS` and adding an ordered
-`deploy-<name>` target — ordered because each service's readiness depends on the one before it:
-mcp, then agent, then front, then eval. `deploy-eval` is the one target that cannot gate on a
-rollout: a CronJob has none, and its PVC stays `Pending` by design under
-`WaitForFirstConsumer`, so waiting on `Bound` would hang on a healthy install. It asserts the
-CronJob's image tag instead.
+The top-level `Makefile` cuts one version across all four at once (`make release BUMP=patch`):
+check, bump, commit and tag locally, build and push the images to `ghcr.io/salian14`. A
+component joins it by appending to `COMPONENTS` and `CHARTS`. **It does not deploy, and
+nothing in this repo does** — see [Deploying](#deploying).
 
 Build and test: `make check` in any component (`fmt`, `lint`, tests, chart lint).
 
@@ -168,6 +165,33 @@ named so — `run-stdio` in `mcp`, `venv`/`lock`/`lock-check` in `agent` and `ev
 `front`, `run-judge`/`run-now`/`run-serve`/`db-pull` in `eval`; the Go components keep `vet` as an
 alias for `lint`.
 A new target that belongs to all four goes into all four, or it is not part of the shared set.
+
+## Deploying
+
+The lab is deployed by **Argo CD**, under the lab's application developer contract (linked
+from `~/.claude/CLAUDE.md`; read it before changing anything deploy-shaped).
+`docs/deploy.md` is this repo's side of it. The shape:
+
+- `deploy/applications.yaml` holds three `Application`s — `fathom-mcp`, `fathom-agent`,
+  `fathom-front` — each rendering its chart from `bifrost` into namespace `fathom` with
+  automated sync, prune and self-heal. **A commit merged to `bifrost` is the deployment.**
+  A PR branch is not deployed.
+- There are no deploy targets, no `helm install/upgrade` and no `--set`. A change to what
+  runs is a change to `values.yaml`; a new version is the bump commit from `make release`,
+  whose images are pushed before it can merge. Never overwrite an image tag.
+- Registering the Applications is the one `kubectl apply`, once per lab build, and it is a
+  human's to run.
+- `fathom-front` is the only thing exposed: a `VirtualService` on the lab's shared gateway
+  under `/fathom/`, rewritten to `/`. No NodePorts. The page must request relative URLs
+  only; `TestScriptsRequestRelativeURLs` pins it.
+- `fathom-mcp`'s ClusterRole is cluster-scoped and was approved by the lab owner
+  (2026-11-15). Anything else cluster-scoped, any second namespace, any NodePort is a
+  request to the lab owner first.
+- **`eval` is not deployed to the lab**: it needs exactly those things and they have not
+  been requested. It has no Application; do not add one without that decision.
+- `deploy/workflows/images.yml` is a build-and-push workflow parked outside
+  `.github/workflows/` for a human to install. Agents still do not write to
+  `.github/workflows/`.
 
 ## Telemetry
 
@@ -249,5 +273,5 @@ infrastructure.
 `~/.claude/CLAUDE.md` defines the branching and CI/CD pipeline for this repo (`bifrost` = dev,
 `asgard` = prod, `agent/<type>/<desc>` branches, no direct pushes, no manual `terraform apply` or
 `ansible-playbook`). Those rules apply here in full. Additionally, in this repo: do not run
-`helm install/upgrade`, `kubectl apply`, or `vagrant up/destroy` against the real cluster — propose
-the manifests and let the pipeline or the user apply them.
+`helm install/upgrade`, `kubectl apply`, or `vagrant up/destroy` against the real cluster — commit
+the manifests and let Argo CD sync them; registering `deploy/applications.yaml` is the user's to do.

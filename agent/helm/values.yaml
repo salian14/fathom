@@ -1,12 +1,15 @@
 namespace:
   name: fathom
-  # False by default: the fathom-mcp chart already creates this namespace, and two
-  # releases both owning a Namespace object collide on install.
+  # False: Argo CD creates the namespace (CreateNamespace=true on the Applications
+  # in deploy/applications.yaml). No chart renders it.
   create: false
 
 replicaCount: 1
 image:
-  repository: registry.lab:5000/fathom-agent
+  # Public, because the lab contract (5.3) has tenants pull from outside the lab:
+  # an image that lives there survives a lab rebuild. The tag stays empty so the
+  # chart's appVersion pins it -- a version bump committed to git is the deploy.
+  repository: ghcr.io/salian14/fathom-agent
   tag: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
@@ -14,16 +17,15 @@ nameOverride: ""
 fullnameOverride: ""
 
 service:
-  # NodePort so the agent is reachable from the host without a port-forward: the
-  # nodes are on the same libvirt network as the workstation (192.168.56.0/24),
-  # so http://<any-node-ip>:<nodePort> works directly. ClusterIP still does the
-  # job if you would rather tunnel.
-  type: NodePort
+  # ClusterIP: the lab contract (6.3) has tenants use the shared gateway rather
+  # than NodePorts, and the only caller that needs the agent is fathom-front, in
+  # this namespace. From the workstation, port-forward:
+  #   kubectl --context spellcore-k8s-lab -n fathom port-forward svc/fathom-agent 8081:8080
+  type: ClusterIP
   port: 8080
-  # Only read when type is NodePort (or LoadBalancer). Pinned rather than left to
-  # the API server so the URL survives a reinstall; must be inside the cluster's
-  # service-node-port-range, 30000-32767 by default. Set to null to let k8s pick.
-  nodePort: 30080
+  # Only read when type is NodePort (or LoadBalancer), which the lab needs
+  # approval for. Null lets the API server assign one.
+  nodePort: null
 
 serviceAccount:
   create: true

@@ -1,4 +1,4 @@
-# Deploying fathom-front
+# fathom-front
 
 `fathom-front` is Fathom's UI: a static page served from a small Go binary, with
 `/api/chat` reverse-proxied to `fathom-agent`. It exists because the agent answers over
@@ -17,7 +17,7 @@ host-side Ollama server are separate deliverables; see `../agent/README.md`,
 
 ```
     browser
-       |  NodePort 30081
+       |  lab gateway :30880, /fathom/ -> /
        v
   +---------------+   /api/chat -> /chat   +---------------+   MCP over HTTP   +--------------+
   | fathom-front  |----------------------->| fathom-agent  |------------------>|  fathom-mcp  |
@@ -42,7 +42,7 @@ host-side Ollama server are separate deliverables; see `../agent/README.md`,
 Four things follow from that picture, and they are most of what this component is.
 
 - **The page and the API share an origin.** The browser never dials the agent. That is why
-  `fathom-agent` needs no CORS middleware and could drop its own NodePort entirely: the only
+  `fathom-agent` needs no CORS middleware and no exposure of its own: the only
   thing that talks to it is a pod in the same namespace.
 - **This service holds nothing.** No Kubernetes credentials (`automountServiceAccountToken:
   false`, no Role, no binding) and no conversation state. Every cluster read still goes
@@ -57,8 +57,9 @@ Four things follow from that picture, and they are most of what this component i
 ## Prerequisites
 
 - `fathom-agent` deployed and its `/readyz` returning 200 (`../agent/README.md`)
-- `helm` 3.x and a kubeconfig pointing at the target cluster
-- Docker, and push access to `registry.lab:5000`
+- Docker, and push access to `ghcr.io/salian14`
+- `helm` 3.x for chart lint and render; `kubectl` with the `spellcore-k8s-lab` context for
+  looking. Neither installs anything — see [`../docs/deploy.md`](../docs/deploy.md)
 
 ## 1. Build and push the image
 
@@ -67,59 +68,61 @@ From `front/`:
 ```sh
 make check                    # gofmt, go vet, go test, UI checks, helm lint + template
 make help                     # the full target list
-make push VERSION=0.5.1
+docker login ghcr.io
+make push VERSION=0.5.4       # -> ghcr.io/salian14/fathom-front:0.5.4
 ```
 
-The tag matters: the chart defaults `image.tag` to `.Chart.AppVersion`. `make image` without
-`VERSION` derives a tag from `git describe`, which will not match — pass
-`--set image.tag=<tag>` at install time in that case.
-
-The registry notes in `../mcp/README.md` apply unchanged here: the insecure-registry
-configuration, and the `ctr -n k8s.io images import` side-load fallback if the registry is
-unreachable from a node.
+The tag matters: the chart pins `image.tag` to `.Chart.AppVersion`, and Argo CD deploys
+exactly what the chart names. `make image` without `VERSION` derives a tag from
+`git describe`, which no chart names — useful locally, never deployed. Never overwrite a
+pushed tag; a new image is a new version (`make release` at the root).
 
 The UI is compiled into the binary with `embed`, so the image is the binary and nothing else —
 there is no asset directory to mount and no ConfigMap to keep in step with the code.
 
-## 2. Install the chart
+## 2. Deploy
 
-Like the agent chart, this one defaults `namespace.create=false` — `fathom` already exists and
-two releases both declaring it collide.
+There is no install step in this directory. Argo CD renders `front/helm` from the `bifrost`
+branch as the `fathom-front` Application (`../deploy/applications.yaml`); a merged commit is
+the deployment. The chart does not create the `fathom` namespace — Argo CD does.
 
-```sh
-helm install fathom-front ./helm
-```
-
-Preview without touching the cluster:
+Preview what Argo CD will apply, without touching the cluster:
 
 ```sh
-helm template fathom-front ./helm
-helm install fathom-front ./helm --dry-run
+make render-chart             # helm template fathom-front ./helm
 ```
 
 ## 3. Verify
 
 ```sh
-kubectl -n fathom rollout status deploy/fathom-front
+kubectl --context spellcore-k8s-lab -n argocd get application fathom-front   # Synced / Healthy
+kubectl --context spellcore-k8s-lab -n fathom rollout status deploy/fathom-front
 
-# NodePort 30081, on the same 192.168.56.0/24 libvirt network as this workstation.
-NODE=192.168.56.10
-open http://$NODE:30081
+FRONT=http://192.168.56.10:30880/fathom
+open $FRONT/                  # the trailing slash matters
 ```
 
-Any node's IP works — `kube-proxy` forwards the port from every node regardless of where the
-pod landed. If you would rather not expose it, set `service.type=ClusterIP` and tunnel:
+That address is the lab's shared Istio ingress gateway. The chart renders a `VirtualService`
+(`gateway.enabled`) that attaches to `istio-ingress/lab-gateway`, matches the prefix
+`/fathom/` and rewrites it to `/`, so this binary serves the same paths behind the gateway
+as it does on a port-forward. There is no NodePort.
+
+**The page therefore requests relative URLs only** — `api/chat`, never `/api/chat`. A
+root-absolute URL would leave the `/fathom/` prefix and land on whatever the gateway routes
+at its root. `TestScriptsRequestRelativeURLs` fails the build if one is added.
+
+To bypass the gateway, tunnel:
 
 ```sh
-kubectl -n fathom port-forward svc/fathom-front 8082:8080 &
+kubectl --context spellcore-k8s-lab -n fathom port-forward svc/fathom-front 8082:8080 &
 open http://localhost:8082
 ```
 
 The probes:
 
 ```sh
-curl -s  http://$NODE:30081/healthz   # this process is up
-curl -si http://$NODE:30081/readyz    # the AGENT is ready, in the agent's own words
+curl -s  $FRONT/healthz   # this process is up
+curl -si $FRONT/readyz    # the AGENT is ready, in the agent's own words
 ```
 
 `/readyz` is the one worth trusting, and it is deliberately not about this service. It calls
@@ -194,11 +197,14 @@ variables, the same pattern the other three components use.
 
 | Value | Default | What it does |
 |---|---|---|
-| `namespace.name` / `namespace.create` | `fathom` / `false` | Where the workload lives; creation is off because the MCP chart owns it |
-| `image.repository` / `image.tag` | `registry.lab:5000/fathom-front` / chart appVersion | Image coordinates |
+| `namespace.name` / `namespace.create` | `fathom` / `false` | Where the workload lives; creation is off because Argo CD creates the namespace |
+| `image.repository` / `image.tag` | `ghcr.io/salian14/fathom-front` / chart appVersion | Image coordinates |
 | `service.port` | `8080` | Container port, Service port, and the listen address |
-| `service.type` | `NodePort` | `NodePort` so a browser on the host can open it; `ClusterIP` if you prefer a port-forward |
-| `service.nodePort` | `30081` | Pinned so the URL survives a reinstall. 30080 is the agent's. Null lets the API server assign one |
+| `service.type` | `ClusterIP` | The browser comes in through the gateway route below. A `NodePort` needs the lab owner's approval |
+| `service.nodePort` | `null` | Ignored unless `service.type` is `NodePort`; null lets the API server assign one |
+| `gateway.enabled` | `true` | Renders the `VirtualService` on the lab's shared gateway. Off, nothing is rendered and no Istio CRD is needed |
+| `gateway.name` | `istio-ingress/lab-gateway` | The platform-owned gateway — the only one a tenant may name |
+| `gateway.prefix` | `/fathom/` | Must be `/<namespace>/`; rewritten to `/` before the request reaches the pod |
 | `agent.url` | `http://fathom-agent.fathom.svc.cluster.local:8080` | Base URL only — `/chat` and `/readyz` are the agent's API, not knobs |
 | `agent.timeout` | `200s` | Whole-turn budget for the proxied call. **Must exceed the agent's `requestTimeout`** |
 | `agent.readyTimeout` | `5s` | Bounds the `/readyz` call into the agent |
@@ -295,6 +301,13 @@ crashed or was rolled during the turn; the answer is not recoverable, and Retry 
 means the model ran long. `the agent did not answer in time` is this service's, and means
 `agent.timeout` is set below the agent's `requestTimeout`.
 
+**The gateway URL returns 404** — `404` from `192.168.56.10:30880` means the gateway is up
+and nothing matched. Check the trailing slash (`/fathom/`, not `/fathom`), then that the
+`VirtualService` exists: `kubectl -n fathom get virtualservice fathom-front`.
+
+**The page loads but every request 404s** — a root-absolute URL crept into the page's
+JavaScript, so the browser is asking the gateway for `/api/...` instead of `/fathom/api/...`.
+
 **There is no Evals tab** — that is the gate, not a fault. `eval.url` is empty, so no route
 is registered and the page does not offer the view. `curl -s <front>/api/features` returns
 `{"eval":false}` and confirms it. Set `eval.url` to the read service's in-cluster address;
@@ -320,19 +333,14 @@ rules it out.
 survives `off` (the propagator is installed unconditionally) but the outbound transport is only
 instrumented when telemetry is on, so the agent's span becomes a new root.
 
-## Upgrade and uninstall
+## Upgrade and removal
 
-```sh
-helm upgrade fathom-front ./helm --set image.tag=0.5.2
-helm uninstall fathom-front
-```
+Upgrading is a version bump merged to `bifrost` (`make release` at the repo root); removal
+is deleting the `fathom-front` Application. Both are in
+[`../docs/deploy.md`](../docs/deploy.md).
 
 Changes to `agent.*`, `front.*` or `otel.*` roll the pods automatically — the Deployment
 carries a `checksum/config` annotation over those blocks.
-
-Note that `make release` at the repository root does all of this for all four components at
-one version; this chart is wired into it as `deploy-front`, rolled last because its readiness
-depends on the agent's.
 
 ## The published contract
 

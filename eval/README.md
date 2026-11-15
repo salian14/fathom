@@ -4,6 +4,15 @@ The evaluation harness. It stages deliberately broken workloads in disposable
 namespaces, asks `fathom-agent` questions whose correct answers are known in advance,
 grades the responses deterministically, and stores every result in SQLite.
 
+> **Not deployed to the lab at present.** Fathom reaches the lab through Argo CD
+> ([`../docs/deploy.md`](../docs/deploy.md)), and this component has no Application
+> there: it needs a second namespace, a ClusterRole that creates and deletes namespaces,
+> and a PriorityClass, each of which the lab's contract makes a request to the lab
+> owner. Its fixture images also still point at the lab's private registry. The install
+> and upgrade sections below describe the chart as it would be installed by hand on a
+> cluster you own; do not run them against the lab. The component is still built,
+> tested and versioned with the rest.
+
 Nothing else in Fathom measures whether the agent is *right*. The unit tests stop at the
 wiring — `agent/tests/test_api.py` says so itself: *"The graph is stubbed: these check
 the wiring around the model, not the model."* Without this component, a system-prompt
@@ -401,9 +410,6 @@ same `fathom-eval` binary with different arguments, which is what keeps
 `FATHOM_EVAL_DB_PATH` a single definition in `_helpers.tpl` rather than three that can
 drift.
 
-The registry notes in `../mcp/README.md` apply unchanged — the insecure-registry
-configuration and the `ctr -n k8s.io images import` side-load fallback.
-
 ### 2. Install the chart
 
 Unlike `agent/` and `front/`, this chart **creates its own namespace**. `fathom-eval`
@@ -429,8 +435,8 @@ evaluation; see [Running it](#running-it).
 
 There is no rollout to wait on for the CronJobs — a CronJob has no readiness — so the
 install is checked by asserting what was created rather than what became healthy. That
-is also why `make deploy-eval` at the repository root asserts the CronJob's image tag
-instead of gating on a rollout.
+is the check to make by hand: the CronJob exists and its job template names the image
+tag you expect.
 
 ```sh
 kubectl -n fathom-eval get cronjob
@@ -488,7 +494,8 @@ Forbid` covers only Jobs the CronJob controller creates, so nothing in the clust
 would otherwise stop a hand-made Job landing on top of a live run and colliding on the
 fixture namespaces and the results database.
 
-Locally, against the deployed agent's NodePort:
+Locally, against the deployed agent — it has no NodePort, so port-forward it to
+`localhost:8081` first (`AGENT_URL` in the Makefile says how):
 
 ```sh
 make -C eval run-local FIXTURES=healthy,crashloop ITERATIONS=2
@@ -521,7 +528,7 @@ it, so the three workloads cannot disagree about the database path.
 | Value | Default | What it does |
 |---|---|---|
 | `namespace.name` / `namespace.create` | `fathom-eval` / `true` | Unlike `agent/` and `front/`, this chart owns its namespace — a different object from `fathom`, so no collision |
-| `image.repository` / `image.tag` | `registry.lab:5000/fathom-eval` / chart appVersion | One image for all three workloads |
+| `image.repository` / `image.tag` | `ghcr.io/salian14/fathom-eval` / chart appVersion | One image for all three workloads |
 | `rbac.create` | `true` | The write grant. See [Write access](#write-access) |
 | `rbac.fixtureNamespaces` | the ten `fathom-eval-*` names | Every namespace the harness may `delete`, by exact name. `create` cannot be name-scoped in RBAC, so this is the tightest half of the grant |
 | `eval.agentUrl` | `http://fathom-agent.fathom.svc.cluster.local:8080` | The in-cluster Service, not the NodePort — dialling a node address from inside the cluster adds a dependency on one node for nothing |

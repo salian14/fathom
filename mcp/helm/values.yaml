@@ -1,10 +1,17 @@
 namespace:
   name: fathom
-  create: true
+  # False: Argo CD creates the namespace (CreateNamespace=true on the Applications
+  # in deploy/applications.yaml), which is the one cluster-scoped object the lab
+  # contract lets a tenant have without asking. A Namespace rendered here as well
+  # would be a second owner of the same object.
+  create: false
 
 replicaCount: 1
 image:
-  repository: registry.lab:5000/fathom-mcp
+  # Public, because the lab contract (5.3) has tenants pull from outside the lab:
+  # an image that lives there survives a lab rebuild. The tag stays empty so the
+  # chart's appVersion pins it -- a version bump committed to git is the deploy.
+  repository: ghcr.io/salian14/fathom-mcp
   tag: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []

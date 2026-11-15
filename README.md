@@ -33,8 +33,8 @@ flowchart LR
 
     subgraph cluster["Kubernetes cluster"]
         subgraph nsfathom["namespace: fathom"]
-            front["fathom-front — Go<br/>chat + eval UI, NodePort 30081<br/>no credentials"]
-            agent["fathom-agent — Python<br/>agent loop, NodePort 30080<br/>no credentials"]
+            front["fathom-front — Go<br/>chat + eval UI, gateway /fathom/<br/>no credentials"]
+            agent["fathom-agent — Python<br/>agent loop, ClusterIP<br/>no credentials"]
             mcp["fathom-mcp — Go<br/>six tools, ClusterIP :8080/mcp<br/>ServiceAccount + RBAC"]
         end
         subgraph nseval["namespace: fathom-eval"]
@@ -129,7 +129,7 @@ UI counts the seconds out loud so the wait does not read as a hang.
 | Built on | MCP Go SDK, client-go | FastAPI, LangGraph | stdlib `net/http` — no framework |
 | K8s credentials | **yes** — ClusterRole, `get`/`list` | none | none |
 | Conversation state | none | none — `/chat` is stateless | none — the transcript lives in the browser |
-| Reached at | `fathom-mcp.fathom.svc.cluster.local:8080/mcp` | NodePort `30080` | NodePort `30081` |
+| Reached at | `fathom-mcp.fathom.svc.cluster.local:8080/mcp` | ClusterIP `fathom-agent.fathom.svc.cluster.local:8080` | the lab gateway, `http://192.168.56.10:30880/fathom/` |
 
 `eval/` is a fourth component and sits apart from that table on purpose — it is not on
 the request path. In namespace `fathom-eval`: two batch CronJobs that stage broken
@@ -197,10 +197,12 @@ loudly when it is missing.
   ip -brief addr show           # the host's address on that same subnet
   ```
 
-- **An image registry the nodes can pull from** — `registry.lab:5000`, plain HTTP, so
-  Docker and containerd both need it listed as insecure. If that is more trouble than it
-  is worth, `mcp/README.md` documents side-loading images with
-  `ctr -n k8s.io images import` instead.
+- **A public image registry** — `ghcr.io/salian14`. The nodes pull through NAT, and an
+  image that lives outside the lab survives a lab rebuild. The packages must be public.
+
+- **Argo CD and the shared ingress gateway**, both provided by the lab. Argo CD is how
+  Fathom is deployed; the gateway is how the UI is reached. See
+  [`docs/deploy.md`](docs/deploy.md).
 
 - **An OTLP collector** at `otel-collector.observability.svc.cluster.local:4317`, accepting
   gRPC in plaintext. If you do not have one, set `otel.mode=off` (or `console`) in all
@@ -241,8 +243,8 @@ From `ollama/config.env`, which is the single source of truth for all of it:
 | Go | 1.26+ | `mcp`, `front` | cannot build either |
 | Python | 3.12+ | `agent` | cannot build the agent |
 | Docker | any | building images, and `make lock` in `agent/` | no images; `make lock` fails |
-| kubectl | matching the cluster | deploying, and the rollout gates in `make deploy` | cannot deploy |
-| helm | 3.x | install and upgrade, chart lint | `lint-chart` **skips, cleanly** |
+| kubectl | matching the cluster | registering the Argo CD Applications once, and looking | cannot register or inspect |
+| helm | 3.x | chart lint and render — Argo CD does the installing | `lint-chart` **skips, cleanly** |
 | node | any | the `front` UI tests | `test-ui` **skips, cleanly** |
 | git | any | version derivation via `git describe` | versions fall back to `dev` |
 
@@ -295,6 +297,7 @@ ollama/         host-side setup — config.env (every knob) + setup.sh (applies 
 contracts/      GENERATED — what each service publishes. Never edit; `make contracts`
 scripts/        contracts.py, the writer behind `make contracts`
 .githooks/      the opt-in pre-commit hook; install with `make hooks`
+deploy/         applications.yaml — the Argo CD Applications that deploy the lab
 Makefile        cuts one version across all four components at once
 ```
 
@@ -302,12 +305,11 @@ Three structural facts that catch people out:
 
 - **There is no top-level `helm/`.** The charts are `agent/helm`, `mcp/helm`,
   `front/helm` and `eval/helm`.
-- **`mcp/helm` creates the `fathom` namespace and `agent`/`front` do not**
-  (`namespace.create: false`). Two Helm releases both owning one Namespace object collide
-  on install.
-- **`eval/helm` does create a namespace**, and does not collide, because `fathom-eval`
-  is a different object. It is a separate namespace because that release holds the only
-  write credentials in the repo.
+- **No chart in the `fathom` namespace creates it** (`namespace.create: false` in all
+  three). Argo CD does, from `deploy/applications.yaml`.
+- **`eval/helm` does create a namespace**, `fathom-eval`, because that release holds the
+  only write credentials in the repo. It is not deployed to the lab; see
+  [`docs/deploy.md`](docs/deploy.md).
 
 ---
 
@@ -332,39 +334,39 @@ values to copy into `agent/helm/values.yaml`.
 make check                    # every component's fmt, lint, tests, chart lint
 ```
 
-**3. Build and push the images.**
+**3. Build and push the images** to `ghcr.io/salian14`, at the version the charts name.
 
 ```sh
-make -C mcp push VERSION=0.5.1
-make -C agent push VERSION=0.5.1
-make -C front push VERSION=0.5.1
+docker login ghcr.io
+make -C mcp push VERSION=0.5.4
+make -C agent push VERSION=0.5.4
+make -C front push VERSION=0.5.4
 ```
 
-**4. Install, in order — mcp, then agent, then front.** The order is load-bearing, not
-cosmetic: each service dials the one before it during startup, and `fathom-front`'s
-readiness probe *is* the agent's readiness. A pod rolled against a half-rolled dependency
-fails its probe and restarts.
+**4. Register the Argo CD Applications** — once per lab build, and the only thing applied
+by hand. From then on a commit on `bifrost` is the deployment.
 
 ```sh
-helm install fathom-mcp   ./mcp/helm            # creates the namespace
-helm install fathom-agent ./agent/helm
-helm install fathom-front ./front/helm
+kubectl --context spellcore-k8s-lab -n argocd apply -f deploy/applications.yaml
 ```
 
-Per-component detail — insecure-registry setup, side-loading, RBAC scoping, every value —
-lives in the three component READMEs linked at the bottom.
+There is no install order to get right: each service reports not-ready until the one it
+dials answers, so the three converge on their own. [`docs/deploy.md`](docs/deploy.md) has
+the preflight, the release flow, and what to do after a lab rebuild.
 
 **5. Verify.**
 
 ```sh
-curl -s http://<node-ip>:30080/readyz     # agent: Ollama reachable AND MCP advertising tools
-open http://<node-ip>:30081               # the UI
+kubectl --context spellcore-k8s-lab -n argocd get applications   # fathom-*: Synced / Healthy
+curl -s http://192.168.56.10:30880/fathom/readyz                 # agent ready: Ollama AND MCP
+open http://192.168.56.10:30880/fathom/                          # the UI
 ```
 
 `/readyz` is the check worth trusting. On the MCP server it calls the Kubernetes API with
 the pod's own credentials, so a 200 means the token and CA are mounted and working. On the
 agent it dials both Ollama and the MCP server, and names which one failed. On the front it
-is simply the agent's readiness forwarded verbatim.
+is simply the agent's readiness forwarded verbatim — which is why the one URL above covers
+all three.
 
 ### The agent requests the alias, never a base tag
 
@@ -450,7 +452,7 @@ path.
 The root `Makefile` exists for the one operation that spans all four components:
 
 ```sh
-make release BUMP=patch       # preflight, check, bump, push, deploy
+make release BUMP=patch       # preflight, check, bump, push
 make version                  # show current and next
 make render                   # render every chart at the next version
 ```
@@ -459,13 +461,14 @@ Three things a reader should know before running it:
 
 - **The versions move in lockstep on purpose** — one Fathom version, not three. The base
   is the highest version any chart currently declares.
-- **Nothing contacts a remote.** The bump commits and tags itself, but both stay local and
-  go out through the normal PR flow.
-- **Deploy is ordered, not merely sequenced.** `deploy-agent` waits for `fathom-mcp`'s new
-  pods to actually serve; `deploy-front` waits for the agent's.
+- **Nothing contacts a git remote or a cluster.** The bump commits and tags itself, but
+  both stay local and go out through the normal PR flow. The images are the one thing
+  that leaves the machine, to `ghcr.io/salian14`.
+- **It does not deploy.** Argo CD rolls the lab when the bump commit is merged to
+  `bifrost`. The images are pushed first, so the tag the charts name always exists by
+  then. See [`docs/deploy.md`](docs/deploy.md).
 
-Knobs: `ALLOW_DIRTY=1`, `SKIP_CHECK=1`, `NO_COMMIT=1`, `NO_TAG=1`, `HELM_NAMESPACE`,
-`FATHOM_NS`, `ROLLOUT_TIMEOUT`. `make help` lists them.
+Knobs: `ALLOW_DIRTY=1`, `SKIP_CHECK=1`, `NO_COMMIT=1`, `NO_TAG=1`. `make help` lists them.
 
 ### On CI, and who runs what
 
@@ -508,8 +511,9 @@ what those jobs wrote.)
 
 `CLAUDE.md` describes a `bifrost` (dev) → `asgard` (prod) branch pipeline and the rules
 that go with it. Those are operational rules for changes to this repo; the pipeline that
-enforces them is defined elsewhere. In practice: `helm install/upgrade` and `kubectl
-apply` against the real cluster are a human's to run.
+enforces them is defined elsewhere. In practice: nobody runs `helm install/upgrade`
+against the lab — Argo CD deploys it from `bifrost` — and the one `kubectl apply`, which
+registers the Applications, is a human's to run.
 
 ---
 
@@ -592,9 +596,10 @@ question text, metric names and PromQL queries are span attributes only.
 
 | Document | Covers |
 |---|---|
-| [`mcp/README.md`](mcp/README.md) | Deploying `fathom-mcp`; the tool set, RBAC scoping, the Prometheus gate, registry setup and side-loading |
-| [`agent/README.md`](agent/README.md) | Deploying `fathom-agent`; the Ollama endpoint problem in full, the `/chat` API, every value |
-| [`front/README.md`](front/README.md) | Deploying `fathom-front`; how the UI caps replayed history, the timeout hierarchy |
+| [`docs/deploy.md`](docs/deploy.md) | How Fathom gets onto the lab: Argo CD, the image registry, the gateway route, releasing, teardown |
+| [`mcp/README.md`](mcp/README.md) | `fathom-mcp`: the tool set, RBAC scoping, the Prometheus gate |
+| [`agent/README.md`](agent/README.md) | `fathom-agent`: the Ollama endpoint problem in full, the `/chat` API, every value |
+| [`front/README.md`](front/README.md) | `fathom-front`: how the UI caps replayed history, the timeout hierarchy |
 | [`ollama/config.env`](ollama/config.env) | The host-side model and network configuration. `ollama/` has no README — the file's comments are the documentation, and they explain every choice |
 | [`eval/README.md`](eval/README.md) | The evaluation harness: the fixture set, what is graded and why, the CPU-only judge, and the one write credential in the repo |
 | [`CLAUDE.md`](CLAUDE.md) | Conventions and operational boundaries for changes to this repo |
