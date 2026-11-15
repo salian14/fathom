@@ -208,3 +208,106 @@ func TestStripNoiseKeepsOtherAnnotations(t *testing.T) {
 		t.Errorf("annotations = %v, want only the revision", ann)
 	}
 }
+
+func decode(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		t.Fatal(err)
+	}
+	return obj
+}
+
+func TestStripNoiseDropsNodeImages(t *testing.T) {
+	node := decode(t, `{
+	  "apiVersion": "v1", "kind": "Node",
+	  "metadata": {"name": "node-1"},
+	  "status": {
+	    "conditions": [{"type": "Ready", "status": "True"}],
+	    "images": [{"names": ["registry.k8s.io/pause:3.9"], "sizeBytes": 322000}],
+	    "nodeInfo": {"kubeletVersion": "v1.31.0"}
+	  }
+	}`)
+	stripNoise(node)
+
+	status := node["status"].(map[string]any)
+	if _, ok := status["images"]; ok {
+		t.Error("status.images survived on a Node")
+	}
+	if _, ok := status["conditions"]; !ok {
+		t.Error("stripNoise removed the Node's conditions")
+	}
+	if _, ok := status["nodeInfo"]; !ok {
+		t.Error("stripNoise removed the Node's nodeInfo")
+	}
+}
+
+func TestStripNoiseDropsInjectedTokenVolume(t *testing.T) {
+	pod := decode(t, `{
+	  "apiVersion": "v1", "kind": "Pod",
+	  "metadata": {"name": "web-0"},
+	  "spec": {
+	    "volumes": [
+	      {"name": "data", "persistentVolumeClaim": {"claimName": "data-web-0"}},
+	      {"name": "kube-api-access-x7k2p", "projected": {"sources": [{"serviceAccountToken": {"path": "token"}}]}},
+	      {"name": "kube-api-access-mine", "emptyDir": {}}
+	    ],
+	    "initContainers": [{
+	      "name": "init",
+	      "volumeMounts": [{"name": "kube-api-access-x7k2p", "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount"}]
+	    }],
+	    "containers": [{
+	      "name": "web",
+	      "volumeMounts": [
+	        {"name": "data", "mountPath": "/data"},
+	        {"name": "kube-api-access-x7k2p", "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount"},
+	        {"name": "kube-api-access-mine", "mountPath": "/scratch"}
+	      ]
+	    }]
+	  }
+	}`)
+	stripNoise(pod)
+
+	out, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+
+	if strings.Contains(got, "kube-api-access-x7k2p") {
+		t.Errorf("the injected token volume or a mount of it survived:\n%s", got)
+	}
+	// Same prefix, not a projected volume: someone named it, so it is theirs.
+	if strings.Count(got, "kube-api-access-mine") != 2 {
+		t.Errorf("an author's own volume was stripped for sharing the prefix:\n%s", got)
+	}
+	if strings.Count(got, `"data"`) != 2 {
+		t.Errorf("an unrelated volume or mount was stripped:\n%s", got)
+	}
+
+	init := pod["spec"].(map[string]any)["initContainers"].([]any)[0].(map[string]any)
+	if _, ok := init["volumeMounts"]; ok {
+		t.Error("a volumeMounts list left empty by stripping was kept")
+	}
+}
+
+func TestStripNoiseLeavesOtherKindsAlone(t *testing.T) {
+	// A custom resource named Pod, and a core kind that is neither: the two
+	// spec/status cuts are for v1 Pod and v1 Node and nothing else.
+	for _, raw := range []string{
+		`{"apiVersion": "example.com/v1", "kind": "Pod",
+		  "spec": {"volumes": [{"name": "kube-api-access-abcde", "projected": {}}]}}`,
+		`{"apiVersion": "example.com/v1", "kind": "Node", "status": {"images": ["a"]}}`,
+		`{"apiVersion": "v1", "kind": "ConfigMap", "status": {"images": ["a"]}}`,
+	} {
+		before := decode(t, raw)
+		after := decode(t, raw)
+		stripNoise(after)
+
+		want, _ := json.Marshal(before)
+		got, _ := json.Marshal(after)
+		if string(got) != string(want) {
+			t.Errorf("stripNoise changed an object it should not recognise:\n got %s\nwant %s", got, want)
+		}
+	}
+}
