@@ -128,9 +128,29 @@ func TestStripNoise(t *testing.T) {
 	  "kind": "Pod",
 	  "metadata": {
 	    "name": "web-0",
+	    "namespace": "prod",
+	    "generateName": "web-",
+	    "uid": "6f1c0f4e-0000-4000-8000-000000000001",
+	    "resourceVersion": "184467",
+	    "selfLink": "/api/v1/namespaces/prod/pods/web-0",
+	    "generation": 4,
+	    "creationTimestamp": "2026-11-01T10:00:00Z",
+	    "deletionTimestamp": "2026-11-15T10:00:00Z",
+	    "finalizers": ["example.com/hold"],
+	    "labels": {"app": "web"},
 	    "managedFields": [{"manager": "kubectl"}],
-	    "annotations": {"kubectl.kubernetes.io/last-applied-configuration": "{...}"}
-	  }
+	    "annotations": {"kubectl.kubernetes.io/last-applied-configuration": "{...}"},
+	    "ownerReferences": [{
+	      "apiVersion": "apps/v1",
+	      "kind": "StatefulSet",
+	      "name": "web",
+	      "uid": "6f1c0f4e-0000-4000-8000-000000000002",
+	      "controller": true,
+	      "blockOwnerDeletion": true
+	    }]
+	  },
+	  "spec": {"nodeName": "node-1"},
+	  "status": {"phase": "Running"}
 	}`)
 
 	var obj map[string]any
@@ -140,13 +160,51 @@ func TestStripNoise(t *testing.T) {
 	stripNoise(obj)
 
 	md := obj["metadata"].(map[string]any)
-	if _, ok := md["managedFields"]; ok {
-		t.Error("managedFields survived stripNoise")
+	for _, k := range []string{"managedFields", "resourceVersion", "uid", "selfLink", "generateName"} {
+		if _, ok := md[k]; ok {
+			t.Errorf("metadata.%s survived stripNoise", k)
+		}
 	}
 	if _, ok := md["annotations"]; ok {
 		t.Error("an annotations map left empty by stripping was kept")
 	}
-	if md["name"] != "web-0" {
-		t.Error("stripNoise removed a field that identifies the object")
+
+	// These are state, not bookkeeping: age, rollout progress, why a delete is
+	// stuck. Losing any of them makes the model blind to a real condition.
+	for _, k := range []string{
+		"name", "namespace", "generation", "creationTimestamp",
+		"deletionTimestamp", "finalizers", "labels",
+	} {
+		if _, ok := md[k]; !ok {
+			t.Errorf("stripNoise removed metadata.%s, which describes the object", k)
+		}
+	}
+
+	owner := md["ownerReferences"].([]any)[0].(map[string]any)
+	for _, k := range []string{"uid", "blockOwnerDeletion"} {
+		if _, ok := owner[k]; ok {
+			t.Errorf("ownerReferences[0].%s survived stripNoise", k)
+		}
+	}
+	if owner["kind"] != "StatefulSet" || owner["name"] != "web" || owner["controller"] != true {
+		t.Errorf("stripNoise damaged the owner reference: %v", owner)
+	}
+
+	if obj["spec"].(map[string]any)["nodeName"] != "node-1" ||
+		obj["status"].(map[string]any)["phase"] != "Running" {
+		t.Error("stripNoise touched spec or status")
+	}
+}
+
+func TestStripNoiseKeepsOtherAnnotations(t *testing.T) {
+	obj := map[string]any{"metadata": map[string]any{"annotations": map[string]any{
+		"kubectl.kubernetes.io/last-applied-configuration": "{...}",
+		"deployment.kubernetes.io/revision":                "7",
+	}}}
+	stripNoise(obj)
+
+	ann := obj["metadata"].(map[string]any)["annotations"].(map[string]any)
+	if len(ann) != 1 || ann["deployment.kubernetes.io/revision"] != "7" {
+		t.Errorf("annotations = %v, want only the revision", ann)
 	}
 }

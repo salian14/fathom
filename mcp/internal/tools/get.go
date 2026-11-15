@@ -227,17 +227,68 @@ func cellString(v any) string {
 	}
 }
 
+// noisyMetadata is the bookkeeping the API server keeps on every object for
+// its own benefit: concurrency tokens, identity handles and field-ownership
+// records. None of it says anything about what the object is or how it is
+// doing, and managedFields alone is routinely larger than the spec.
+//
+// What is deliberately absent from this list, because it is state:
+// creationTimestamp (age), generation (compare with status.observedGeneration
+// to see whether a controller has caught up), deletionTimestamp and finalizers
+// (why something is stuck Terminating), labels, and ownerReferences.
+var noisyMetadata = []string{
+	"managedFields",
+	"resourceVersion",
+	"uid",
+	"selfLink",
+	"generateName",
+}
+
+// noisyAnnotations repeat the object inside itself.
+var noisyAnnotations = []string{
+	"kubectl.kubernetes.io/last-applied-configuration",
+}
+
+// noisyOwnerRef trims each owner reference down to what names the owner. The
+// reference itself stays: "which ReplicaSet owns this pod" is how a model walks
+// from a symptom to its cause.
+var noisyOwnerRef = []string{
+	"uid",
+	"blockOwnerDeletion",
+}
+
+// stripNoise removes metadata that costs context and describes nothing, so
+// that the byte cap is spent on spec and status. It only ever touches
+// metadata: every spec and status field is passed through as the API server
+// returned it, because guessing which of those are "defaults" would mean
+// hiding real configuration from the model.
 func stripNoise(obj map[string]any) {
 	md, ok := obj["metadata"].(map[string]any)
 	if !ok {
 		return
 	}
-	delete(md, "managedFields")
+	for _, k := range noisyMetadata {
+		delete(md, k)
+	}
 
 	if ann, ok := md["annotations"].(map[string]any); ok {
-		delete(ann, "kubectl.kubernetes.io/last-applied-configuration")
+		for _, k := range noisyAnnotations {
+			delete(ann, k)
+		}
 		if len(ann) == 0 {
 			delete(md, "annotations")
+		}
+	}
+
+	if owners, ok := md["ownerReferences"].([]any); ok {
+		for _, o := range owners {
+			ref, ok := o.(map[string]any)
+			if !ok {
+				continue
+			}
+			for _, k := range noisyOwnerRef {
+				delete(ref, k)
+			}
 		}
 	}
 }
