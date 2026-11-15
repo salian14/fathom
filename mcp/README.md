@@ -1,4 +1,4 @@
-# Deploying fathom-mcp
+# fathom-mcp
 
 `fathom-mcp` is the MCP tool server. It exposes three read-only Kubernetes tools
 (`k8s_get`, `k8s_describe`, `k8s_log`) over streamable HTTP, and it ships the
@@ -9,137 +9,67 @@ are backed by Prometheus rather than the Kubernetes API. They are registered
 only when `prometheus.url` is set, which the chart does by default — see
 [Metrics tools](#metrics-tools).
 
-This document covers deploying **this component only**. The agent and the
-host-side Ollama server are separate deliverables; see `../CLAUDE.md`.
+This document covers **this component only**. How Fathom as a whole gets onto the
+lab — Argo CD, the image registry, releasing — is in
+[`../docs/deploy.md`](../docs/deploy.md).
 
 ## Prerequisites
 
-- `helm` 3.x and a kubeconfig whose current context points at the target cluster
 - Docker (or another OCI builder) to build the image
-- Push access to `registry.lab:5000`, and nodes that can pull from it — see
-  [Push the image](#2-push-the-image)
-
-Confirm you are pointed where you think you are before anything else:
-
-```sh
-kubectl config current-context
-kubectl get nodes
-```
+- `helm` 3.x, for `make lint-chart` and `make render-chart` only — nothing here
+  installs with it
+- `kubectl` with the `spellcore-k8s-lab` context, for looking
 
 ## 1. Build the image
 
 From `mcp/`:
 
 ```sh
-make image VERSION=0.5.1
+make check                 # gofmt, go vet, go test, helm lint + template
+make image VERSION=0.5.4
 ```
 
-This produces `registry.lab:5000/fathom-mcp:0.5.1`. The registry host comes from
-`REGISTRY` (default `registry.lab:5000`); override it, or `IMAGE` outright, to
-build for somewhere else. The tag matters: the chart defaults `image.tag` to
-`.Chart.AppVersion`, the version declared in `helm/Chart.yaml`. `make image`
-without `VERSION` derives the tag from `git describe` (e.g. `8957f22-dirty`),
-which will not match the chart default — in that case pass
-`--set image.tag=<tag>` at install time.
-
-Run the gates first if you are about to ship this anywhere:
-
-```sh
-make check   # gofmt, go vet, go test, helm lint + template
-make help    # the full target list
-```
+This produces `ghcr.io/salian14/fathom-mcp:0.5.4`. The registry comes from
+`REGISTRY` (default `ghcr.io/salian14`); override it, or `IMAGE` outright, to
+build for somewhere else. `make image` without `VERSION` derives the tag from
+`git describe` (e.g. `8957f22-dirty`), which no chart names — useful locally,
+never deployed.
 
 ## 2. Push the image
 
-The chart's `image.repository` is `registry.lab:5000/fathom-mcp`, so the nodes
-pull from `registry.lab:5000`. Build and push in one step:
-
 ```sh
-make push VERSION=0.5.1
+docker login ghcr.io
+make push VERSION=0.5.4
 ```
 
-`push` depends on `image`, so it builds first; it pushes exactly the tag it
-built. `image.pullPolicy` is `IfNotPresent`, which is fine for immutable version
-tags — if you overwrite a tag in place, either bump the version or set
-`--set image.pullPolicy=Always` so the node actually re-pulls.
+`push` depends on `image`, so it builds first and pushes exactly the tag it
+built. The package must be public on GHCR for the lab's nodes to pull it.
 
-If `registry.lab:5000` is served over plain HTTP, both ends need to be told to
-allow it: the daemon doing the push (`insecure-registries` in
-`/etc/docker/daemon.json`) and containerd on each node (a
-`hosts.toml` under `/etc/containerd/certs.d/registry.lab:5000/` with
-`skip_verify = true`). That is node configuration, so it belongs in Ansible
-rather than here.
+**Never overwrite a tag.** The chart pins `image.tag` to its `appVersion` and
+`image.pullPolicy` is `IfNotPresent`: a re-pushed tag changes nothing in git, so
+Argo CD deploys nothing, and nodes keep the image they already have. A new image
+is a new version — `make release` at the repo root.
 
-Add `imagePullSecrets` in values if the registry requires authentication.
+## 3. Deploy
 
-### Fallback — side-load into containerd
+There is no install step in this directory. Argo CD renders `mcp/helm` from the
+`bifrost` branch as the `fathom-mcp` Application (`../deploy/applications.yaml`)
+and keeps the `fathom` namespace matching it; a merged commit is the deployment.
 
-Still workable if the registry is down or unreachable from a node. Build with a
-bare name so nothing tries to pull, and match the chart to it:
+The chart pins every resource to `namespace.name` (default `fathom`) and does
+not create that namespace — Argo CD does (`CreateNamespace=true`).
 
-```sh
-make image VERSION=0.5.1 IMAGE=fathom-mcp
-docker save fathom-mcp:0.5.1 -o /tmp/fathom-mcp-0.5.1.tar
-```
-
-Then, for each node that could schedule the pod (control plane plus both
-workers, unless you constrain scheduling with `nodeSelector`):
+Preview what Argo CD will apply, without touching the cluster:
 
 ```sh
-# copy the tar to the node, then on the node:
-sudo ctr -n k8s.io images import /tmp/fathom-mcp-0.5.1.tar
-sudo crictl images | grep fathom-mcp   # verify
-```
-
-The `-n k8s.io` is not optional — an image imported into containerd's `default`
-namespace is invisible to kubelet and you get `ErrImageNeverPull` /
-`ImagePullBackOff` with the image apparently present.
-
-Install with `--set image.repository=fathom-mcp` so the pod uses the side-loaded
-image instead of the registry one.
-
-Only one replica runs, so you can skip the copy to every node by pinning the
-pod instead:
-
-```sh
---set nodeSelector."kubernetes\.io/hostname"=k8s-worker1
-```
-
-## 3. Install the chart
-
-The chart pins every resource to `namespace.name` (default `fathom`) rather
-than the release namespace, and creates that namespace itself
-(`namespace.create=true`). So install from a namespace that already exists and
-let the chart place its own resources:
-
-```sh
-helm install fathom-mcp ./helm
-```
-
-Release metadata lands in your current namespace (`default` unless you say
-otherwise); the ServiceAccount, RBAC, Service, and Deployment land in `fathom`.
-
-Do **not** combine the chart's namespace creation with `helm --create-namespace`
-— Helm would create the namespace outside the release and the chart's own
-`Namespace` object then collides with it. If you prefer Helm to own the
-namespace:
-
-```sh
-helm install fathom-mcp ./helm -n fathom --create-namespace \
-  --set namespace.create=false
-```
-
-Preview the manifests without touching the cluster:
-
-```sh
-helm template fathom-mcp ./helm            # render only
-helm install fathom-mcp ./helm --dry-run   # render + server-side validation
+make render-chart          # helm template fathom-mcp ./helm
 ```
 
 ## 4. Verify
 
 ```sh
-kubectl -n fathom rollout status deploy/fathom-mcp
+kubectl --context spellcore-k8s-lab -n argocd get application fathom-mcp   # Synced / Healthy
+kubectl --context spellcore-k8s-lab -n fathom rollout status deploy/fathom-mcp
 ```
 
 Health and MCP endpoint, via port-forward:
@@ -177,7 +107,7 @@ environment variables. The ones that matter at deploy time:
 | Value | Default | What it does |
 |---|---|---|
 | `namespace.name` / `namespace.create` | `fathom` / `true` | Where the workload lives, and whether the chart creates it |
-| `image.repository` / `image.tag` | `registry.lab:5000/fathom-mcp` / chart appVersion | Image coordinates; an empty tag falls back to the chart's `appVersion` |
+| `image.repository` / `image.tag` | `ghcr.io/salian14/fathom-mcp` / chart appVersion | Image coordinates; an empty tag falls back to the chart's `appVersion` |
 | `service.port` | `8080` | Container port, Service port, and the listen address |
 | `server.transport` | `http` | `http` (streamable HTTP, what the chart deploys) or `stdio`, which is for `make run-stdio` and has no meaning in a pod |
 | `server.path` | `/mcp` | HTTP path the MCP endpoint is served on |
@@ -200,12 +130,13 @@ environment variables. The ones that matter at deploy time:
 That one list becomes `FATHOM_MCP_ALLOWED_RESOURCES` (what the tools will
 accept) *and* the ClusterRole rules (what the API server will allow). That
 coupling is deliberate — it is what keeps the tool surface and the RBAC in
-lockstep. Adding a resource kind is a values change plus `helm upgrade`, never a
-code change:
+lockstep. Adding a resource kind is an edit to `k8s.allowedResources` in
+`helm/values.yaml`, committed — never a code change, and never a `--set` against
+the cluster, which Argo CD would revert:
 
-```sh
-helm upgrade fathom-mcp ./helm \
-  --set-json 'k8s.allowedResources=["pods","services","nodes","deployments.apps"]'
+```yaml
+k8s:
+  allowedResources: [pods, services, nodes, deployments.apps]
 ```
 
 Entries are `resource` or `resource.group`, lowercase, no slashes.
@@ -213,7 +144,7 @@ Entries are `resource` or `resource.group`, lowercase, no slashes.
 
 Verbs are hardcoded to `get` and `list` in `helm/templates/_helpers.tpl` and are
 not parameterised. Widening past read verbs ends the Phase 1 safety property, so
-it takes a deliberate template edit and an explicit decision — not a `--set`.
+it takes a deliberate template edit and an explicit decision — not a values change.
 
 ### Metrics tools
 
@@ -222,12 +153,14 @@ API. They are **not registered at all** unless `prometheus.url` is set. The char
 ships it pointed at the lab's Prometheus, whose Service listens on port 80 rather
 than 9090:
 
-```sh
+```yaml
 # what values.yaml already sets
---set prometheus.url=http://prometheus-server.observability.svc.cluster.local:80
+prometheus:
+  url: http://prometheus-server.observability.svc.cluster.local:80
 
 # elsewhere, or to turn the three tools off again
---set prometheus.url=""
+prometheus:
+  url: ""
 ```
 
 The gate is deliberate. A tool that fails on every call is worse than an absent
@@ -268,18 +201,14 @@ in each listed namespace. A Role cannot grant cluster-scoped types, so if you do
 this, drop `nodes`, `namespaces`, and `persistentvolumes` from
 `k8s.allowedResources` — otherwise those tools are advertised to the model and
 then fail with a permission error at call time. The chart's `NOTES.txt` warns
-about exactly this combination on install.
+about exactly this combination, for anyone who installs the chart by hand elsewhere.
 
-## Upgrade and uninstall
+## Upgrade and removal
 
-```sh
-helm upgrade fathom-mcp ./helm --set image.tag=0.5.2
-helm uninstall fathom-mcp
-```
-
-Uninstall removes the ClusterRole and ClusterRoleBinding too. It removes the
-`fathom` namespace only if the chart created it — and that takes everything else
-in the namespace with it, so check before you run it.
+Upgrading is a version bump merged to `bifrost` (`make release` at the repo
+root); Argo CD rolls the Deployment. Removal is deleting the `fathom-mcp`
+Application, whose finalizer takes the ClusterRole and ClusterRoleBinding with
+it. Both are in [`../docs/deploy.md`](../docs/deploy.md).
 
 Note that changes to `k8s.allowedResources` roll the pods automatically: the
 Deployment carries a `checksum/config` annotation over the `k8s`, `server`,
@@ -287,14 +216,11 @@ Deployment carries a `checksum/config` annotation over the `k8s`, `server`,
 
 ## Troubleshooting
 
-**`ImagePullBackOff` / `ErrImageNeverPull`** — the node cannot get the image.
-`kubectl -n fathom describe pod` carries the real reason. If it is a pull
-failure, check the node can reach the registry (`curl -s
-http://registry.lab:5000/v2/fathom-mcp/tags/list` from the node) and that
-containerd is configured to accept it over HTTP. If you side-loaded instead,
-check `sudo crictl images | grep fathom-mcp` on the node the pod landed on
-(`kubectl -n fathom get pod -o wide` tells you which one) and confirm you
-imported with `-n k8s.io`.
+**`ImagePullBackOff`** — the node cannot get the image.
+`kubectl -n fathom describe pod` carries the real reason. The usual two: the
+tag the chart names was never pushed (`docker manifest inspect
+ghcr.io/salian14/fathom-mcp:<appVersion>` from the workstation), or the GHCR
+package is still private.
 
 **Pod runs but `/readyz` returns 503** — the process is up and the API server
 is not answering it. `kubectl -n fathom logs deploy/fathom-mcp` will carry a

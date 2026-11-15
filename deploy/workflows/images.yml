@@ -1,0 +1,89 @@
+# Build and push Fathom's images to GHCR.
+#
+# NOT ACTIVE HERE. GitHub only runs workflows from .github/workflows/, and agents
+# working in this repository are not allowed to write there. A human installs it:
+#
+#   mkdir -p .github/workflows
+#   git mv deploy/workflows/images.yml .github/workflows/images.yml
+#
+# (pushing that needs a token with the `workflow` scope).
+#
+# What it does: on every push to bifrost, for each component, it reads the
+# version the chart names (appVersion) and publishes
+# ghcr.io/<owner>/fathom-<component>:<appVersion> -- but only if that tag does
+# not exist yet. So:
+#
+#   - a release (the version-bump commit landing on bifrost) publishes four new
+#     images, built from the merged tree;
+#   - any other commit publishes nothing, because the tags it names are taken.
+#
+# Never overwriting is the point, not an optimisation. Argo CD deploys from git:
+# a tag whose contents change under it produces no diff, no sync, and nodes that
+# keep whichever image they cached first (lab contract 5.3).
+#
+# One consequence to know about. Argo CD polls bifrost every 60 seconds and this
+# build takes longer than that, so right after a release merge the new pods sit
+# in ImagePullBackOff until the push finishes, then start on kubelet's next
+# retry. The old pods keep serving throughout (rolling update). To avoid even
+# that, run `make push` before merging -- this workflow then finds the tags
+# already there and does nothing.
+#
+# It uses the component Makefiles (`make -C <component> push`), so CI and a
+# workstation build the image the same way. No secret is needed: the built-in
+# GITHUB_TOKEN can write packages for this repository. After the FIRST push of
+# each package, set its visibility to public in the package settings on GitHub,
+# or the lab's nodes cannot pull it.
+name: images
+
+on:
+  push:
+    branches: [bifrost]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [mcp, agent, front, eval]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the version the chart names
+        id: v
+        run: |
+          version="$(sed -nE 's/^appVersion:[[:space:]]*"?([0-9]+\.[0-9]+\.[0-9]+)"?.*/\1/p' '${{ matrix.component }}/helm/Chart.yaml')"
+          [ -n "$version" ] || { echo "no appVersion in ${{ matrix.component }}/helm/Chart.yaml"; exit 1; }
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "registry=ghcr.io/$owner" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/$owner/fathom-${{ matrix.component }}:$version" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: Is the tag already published?
+        id: exists
+        run: |
+          if docker manifest inspect '${{ steps.v.outputs.image }}' >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "${{ steps.v.outputs.image }} already exists; leaving it alone."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        if: steps.exists.outputs.published == 'false'
+        run: |
+          make -C '${{ matrix.component }}' push \
+            VERSION='${{ steps.v.outputs.version }}' \
+            REGISTRY='${{ steps.v.outputs.registry }}'

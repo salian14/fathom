@@ -8,7 +8,7 @@ metadata:
 spec:
   schedule: {{ .Values.cronjob.schedule | quote }}
   {{- /*
-    Shipped suspended. `make deploy-eval` runs at the tail of a release, and an
+    Shipped suspended. A sync should not start an evaluation as a side effect, and an
     unsuspended CronJob would start a multi-hour evaluation against a cluster whose
     three services finished rolling seconds earlier.
   */}}

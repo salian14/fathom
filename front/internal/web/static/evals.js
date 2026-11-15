@@ -20,7 +20,8 @@
 
 // ------------------------------------------------------------------ constants
 
-const EVAL_BASE = '/api/eval';
+// Relative on purpose -- see the note on fetch('api/chat') in app.js.
+const EVAL_BASE = 'api/eval';
 
 // Outcomes onto the three semantic colours the stylesheet already defines.
 // `ceiling` and `no_answer` are --warn rather than --error on purpose: the agent
@@ -556,7 +557,7 @@ function judgementNode(j) {
 // first render is what keeps an install without eval from flashing a dead tab.
 async function initEvals() {
   try {
-    const response = await fetch('/api/features', { cache: 'no-store' });
+    const response = await fetch('api/features', { cache: 'no-store' });
     const features = await readBody(response);
     evalEnabled = response.ok && features && features.eval === true;
   } catch {

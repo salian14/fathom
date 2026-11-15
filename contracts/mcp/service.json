@@ -109,7 +109,7 @@
         8080
       ],
       "images": [
-        "registry.lab:5000/fathom-mcp:0.5.4"
+        "ghcr.io/salian14/fathom-mcp:0.5.4"
       ],
       "kind": "Deployment",
       "name": "fathom-mcp"

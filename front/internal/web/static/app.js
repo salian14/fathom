@@ -430,7 +430,10 @@ async function run(chat, question, history) {
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
-    const response = await fetch('/api/chat', {
+    // Relative, like every URL this page requests: in the lab it is served
+    // under /fathom/ behind the shared gateway, and a leading slash would
+    // escape that prefix and land on another tenant's route.
+    const response = await fetch('api/chat', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ question, history }),
@@ -557,7 +560,7 @@ function setBusy(busy) {
 // typing a question, and /readyz names which one it is.
 async function pollReady() {
   try {
-    const response = await fetch('/readyz', { cache: 'no-store' });
+    const response = await fetch('readyz', { cache: 'no-store' });
     const text = (await response.text()).trim();
     if (response.ok) {
       setStatus('ready', 'agent ready');

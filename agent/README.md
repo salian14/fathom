@@ -1,4 +1,4 @@
-# Deploying fathom-agent
+# fathom-agent
 
 `fathom-agent` is the piece that ties the other two together: a FastAPI service that
 drives the host-side Ollama model against the read-only Kubernetes tools
@@ -44,8 +44,9 @@ awkward:
 - `fathom-mcp` deployed and its `/readyz` returning 200 (`../mcp/README.md`)
 - Ollama running on the host with the `fathom-agent` alias created
   (`sudo ../ollama/setup.sh`, or `--verify` to check an existing install)
-- `helm` 3.x and a kubeconfig pointing at the target cluster
-- Docker, and push access to `registry.lab:5000`
+- Docker, and push access to `ghcr.io/salian14`
+- `helm` 3.x for chart lint and render; `kubectl` with the `spellcore-k8s-lab` context
+  for looking. Neither installs anything — see [`../docs/deploy.md`](../docs/deploy.md)
 
 ## The Ollama endpoint
 
@@ -101,7 +102,7 @@ readiness check failed: ollama unreachable at http://fathom-ollama...: [Errno -2
 ```
 
 So adding `localllm.lab` to the host's `/etc/hosts` is necessary but not sufficient,
-and `--set ollama.service.externalName=registry.lab` does not help either — it fails
+and pointing `ollama.service.externalName` at another `.lab` name does not help either — it fails
 at the same step. The only fix is a `.lab` stub zone in the `coredns` ConfigMap
 forwarding to the dnsmasq on the node network.
 
@@ -136,55 +137,45 @@ From `agent/`:
 ```sh
 make check                    # lock-check, ruff format + lint, pytest, helm lint + template
 make help                     # the full target list
-make push VERSION=0.5.1
+docker login ghcr.io
+make push VERSION=0.5.4       # -> ghcr.io/salian14/fathom-agent:0.5.4
 ```
 
-The tag matters: the chart defaults `image.tag` to `.Chart.AppVersion`, the
-version declared in `helm/Chart.yaml`. `make image` without `VERSION` derives a
-tag from `git describe`, which will not match — pass `--set image.tag=<tag>` at
-install time in that case.
+The tag matters: the chart pins `image.tag` to `.Chart.AppVersion`, and Argo CD
+deploys exactly what the chart names. `make image` without `VERSION` derives a tag
+from `git describe`, which no chart names — useful locally, never deployed. Never
+overwrite a pushed tag; a new image is a new version (`make release` at the root).
 
-The registry notes in `../mcp/README.md` apply unchanged here: the insecure-registry
-configuration, and the `ctr -n k8s.io images import` side-load fallback if the
-registry is unreachable from a node.
+## 2. Deploy
 
-## 2. Install the chart
+There is no install step in this directory. Argo CD renders `agent/helm` from the
+`bifrost` branch as the `fathom-agent` Application (`../deploy/applications.yaml`);
+a merged commit is the deployment. The chart does not create the `fathom`
+namespace — Argo CD does.
 
-Unlike the MCP chart, this one defaults `namespace.create=false` — `fathom` already
-exists, and two releases both declaring the same Namespace collide.
-
-```sh
-helm install fathom-agent ./helm
-```
-
-Preview without touching the cluster:
+Preview what Argo CD will apply, without touching the cluster:
 
 ```sh
-helm template fathom-agent ./helm
-helm install fathom-agent ./helm --dry-run
+make render-chart             # helm template fathom-agent ./helm
 ```
 
 ## 3. Verify
 
 ```sh
-kubectl -n fathom rollout status deploy/fathom-agent
+kubectl --context spellcore-k8s-lab -n argocd get application fathom-agent   # Synced / Healthy
+kubectl --context spellcore-k8s-lab -n fathom rollout status deploy/fathom-agent
 
-# The Service is a NodePort on 30080, and the nodes share the 192.168.56.0/24
-# libvirt network with this workstation, so no tunnel is needed.
-export FATHOM=http://192.168.56.10:30080
+# The Service is ClusterIP: the lab exposes tenants through its shared gateway, and
+# only fathom-front is routed there. Tunnel to reach the agent directly.
+kubectl --context spellcore-k8s-lab -n fathom port-forward svc/fathom-agent 8081:8080 &
+export FATHOM=http://localhost:8081
 
 curl -s $FATHOM/healthz   # process is up
 curl -s $FATHOM/readyz    # process is up AND both dependencies answered
 ```
 
-Any node's IP works — `kube-proxy` forwards the port from every node regardless of
-where the pod landed, so `192.168.56.11` and `.12` are equally valid. If you would
-rather not expose it, set `service.type=ClusterIP` and tunnel instead:
-
-```sh
-kubectl -n fathom port-forward svc/fathom-agent 8081:8080 &
-export FATHOM=http://localhost:8081
-```
+Without a tunnel, the front forwards the agent's readiness verbatim:
+`curl -s http://192.168.56.10:30880/fathom/readyz`.
 
 `/readyz` is the one worth trusting: it returns 200 only when Ollama answered
 `/api/version` *and* the MCP server advertised its tools. A 503 names which one
@@ -297,11 +288,11 @@ environment variables, the same pattern the MCP server uses.
 
 | Value | Default | What it does |
 |---|---|---|
-| `namespace.name` / `namespace.create` | `fathom` / `false` | Where the workload lives; creation is off because the MCP chart owns it |
-| `image.repository` / `image.tag` | `registry.lab:5000/fathom-agent` / chart appVersion | Image coordinates |
+| `namespace.name` / `namespace.create` | `fathom` / `false` | Where the workload lives; creation is off because Argo CD creates the namespace |
+| `image.repository` / `image.tag` | `ghcr.io/salian14/fathom-agent` / chart appVersion | Image coordinates |
 | `service.port` | `8080` | Container port, Service port, and the listen address |
-| `service.type` | `NodePort` | `NodePort` so the host can query the agent directly; `ClusterIP` if you prefer a port-forward |
-| `service.nodePort` | `30080` | Pinned so the URL survives a reinstall. Ignored unless `service.type` is `NodePort`; null lets the API server assign one |
+| `service.type` | `ClusterIP` | Only `fathom-front` calls the agent, from inside the namespace. A `NodePort` needs the lab owner's approval |
+| `service.nodePort` | `null` | Ignored unless `service.type` is `NodePort`; null lets the API server assign one |
 | `mcp.url` | `http://fathom-mcp.fathom.svc.cluster.local:8080/mcp` | The MCP endpoint, path included |
 | `ollama.url` | `http://192.168.56.1:11434` | The host, dialled directly. Copy from `setup.sh` output |
 | `ollama.model` | `fathom-agent` | The **alias**, not the base model tag |
@@ -386,12 +377,11 @@ FATHOM_AGENT_REQUEST_TIMEOUT (30.0s)`. Read the first line of the logs.
 **`OOMKilled`** — the memory limit is 1536Mi and the LangChain import tree is most of
 the baseline. Raise `resources.limits.memory` rather than trimming dependencies.
 
-## Upgrade and uninstall
+## Upgrade and removal
 
-```sh
-helm upgrade fathom-agent ./helm --set image.tag=0.5.2
-helm uninstall fathom-agent
-```
+Upgrading is a version bump merged to `bifrost` (`make release` at the repo root);
+removal is deleting the `fathom-agent` Application. Both are in
+[`../docs/deploy.md`](../docs/deploy.md).
 
 Changes to `agent.*`, `ollama.*`, `mcp.*` or `otel.*` roll the pods automatically —
 the Deployment carries a `checksum/config` annotation over those blocks.

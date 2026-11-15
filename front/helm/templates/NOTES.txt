@@ -1,16 +1,13 @@
 fathom-front {{ .Chart.AppVersion }} installed into namespace {{ include "fathom-front.namespace" . }}.
 
-{{ if eq .Values.service.type "NodePort" -}}
-Open it from your workstation on any node's IP -- no port-forward needed:
+{{ if .Values.gateway.enabled -}}
+Open it from the lab workstation through the shared ingress gateway:
 
-  NODE=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
-  echo http://$NODE:{{ .Values.service.nodePort | default "<assigned-nodeport>" }}
-{{- if not .Values.service.nodePort }}
-  # nodePort was left unset, so the API server assigned one. Read it back with:
-  #   kubectl -n {{ include "fathom-front.namespace" . }} get svc {{ include "fathom-front.fullname" . }} -o jsonpath='{.spec.ports[0].nodePort}'
-{{- end }}
+  http://192.168.56.10:30880{{ .Values.gateway.prefix }}
+
+The trailing slash matters: the route matches the prefix {{ .Values.gateway.prefix }} and nothing shorter.
 {{ else -}}
-The Service is {{ .Values.service.type }}, so tunnel to it first:
+No gateway route is rendered, so tunnel to the Service first:
 
   kubectl -n {{ include "fathom-front.namespace" . }} port-forward svc/{{ include "fathom-front.fullname" . }} 8082:{{ .Values.service.port }}
   # then open http://localhost:8082
@@ -22,7 +19,7 @@ It proxies to one endpoint and nothing else:
 /readyz here reports the AGENT's readiness, forwarding its message verbatim, so a
 503 still names whether Ollama or the MCP server is the one that failed:
 
-  curl -s http://$NODE:{{ .Values.service.nodePort | default "<nodeport>" }}/readyz
+  curl -s http://192.168.56.10:30880{{ .Values.gateway.prefix }}readyz
 
 Two things worth knowing before the first question:
 

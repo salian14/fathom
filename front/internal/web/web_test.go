@@ -112,3 +112,31 @@ func TestIndexLoadsScriptsInOrder(t *testing.T) {
 		t.Error("evals.js is loaded before app.js; it depends on app.js's helpers")
 	}
 }
+
+// TestScriptsRequestRelativeURLs pins the property the lab deployment rests on.
+//
+// The page is served under /fathom/ behind a gateway shared with other tenants,
+// with the prefix stripped before the request reaches this binary. A fetch of
+// '/api/chat' would resolve against the origin, leave that prefix, and hit
+// whatever route -- or 404 -- lives at the gateway's root. Nothing on a
+// port-forward or in run-local would show it, because there the two coincide.
+func TestScriptsRequestRelativeURLs(t *testing.T) {
+	scripts, err := fs.Glob(content, "static/*.js")
+	if err != nil {
+		t.Fatalf("globbing scripts: %v", err)
+	}
+
+	for _, name := range scripts {
+		js, err := content.ReadFile(name)
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		for i, line := range strings.Split(string(js), "\n") {
+			for _, rooted := range []string{"fetch('/", `fetch("/`, "fetch(`/", "_BASE = '/"} {
+				if strings.Contains(line, rooted) {
+					t.Errorf("%s:%d requests a root-absolute URL (%s); it must be relative to work under the gateway prefix", name, i+1, rooted)
+				}
+			}
+		}
+	}
+}

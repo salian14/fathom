@@ -17,7 +17,7 @@ SHELL       := /bin/bash
 .NOTPARALLEL:
 
 BINARY      := fathom-mcp
-REGISTRY    ?= registry.lab:5000
+REGISTRY    ?= ghcr.io/salian14
 IMAGE       ?= $(REGISTRY)/$(BINARY)
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS     := -s -w -X main.version=$(VERSION)
@@ -46,7 +46,7 @@ help:
 	@echo "  make clean          remove build output"
 	@echo "  make all            check, then build"
 	@echo
-	@echo "Knobs:  VERSION=x.y.z  REGISTRY=<host:port>  IMAGE=<ref>  LOCAL_PORT=$(LOCAL_PORT)"
+	@echo "Knobs:  VERSION=x.y.z  REGISTRY=<host/owner>  IMAGE=<ref>  LOCAL_PORT=$(LOCAL_PORT)"
 	@echo
 	@echo "Version: $(VERSION)"
 

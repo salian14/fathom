@@ -112,7 +112,8 @@ Python components add:
 | Python package | `fathom_<dir>`, underscore | `fathom_agent`, `fathom_eval` |
 | Env var prefix | `FATHOM_<DIR>_` | `FATHOM_MCP_`, `FATHOM_EVAL_` |
 | Chart | `<dir>/helm`, `name: fathom-<dir>` | |
-| Image | `registry.lab:5000/fathom-<dir>` | |
+| Image | `ghcr.io/salian14/fathom-<dir>` | public, tag pinned to the chart's `appVersion` |
+| Argo CD Application | `fathom-<dir>`, in `deploy/applications.yaml` | `fathom-front` |
 
 **One inconsistency, recorded rather than propagated.** Go module paths disagree:
 `mcp/go.mod` is `github.com/spellbound/fathom/mcp` but `front/go.mod` is
@@ -330,18 +331,24 @@ object, so it does not collide.
 
 | Workload | Reached at |
 |---|---|
-| `fathom-front` | NodePort **30081** |
-| `fathom-agent` | NodePort **30080** |
+| `fathom-front` | the lab's shared gateway, `http://192.168.56.10:30880/fathom/` — a `VirtualService`, prefix rewritten to `/` |
+| `fathom-agent` | ClusterIP `:8080` |
 | `fathom-mcp` | ClusterIP `:8080`, path `/mcp` |
 | `fathom-eval-serve` | ClusterIP `:8080` — **never a NodePort** |
 | Ollama (agent) | host `:11434`, outside the cluster |
 | Ollama (judge) | host `:11435`, CPU-only |
 
-Container port is `8080` everywhere; the Service type is what differs. In-cluster
-callers use the Service FQDN, never a NodePort — dialling a node address from inside the
+Container port is `8080` and the Service type is `ClusterIP` everywhere. In-cluster
+callers use the Service FQDN, never a node address — dialling one from inside the
 cluster adds a dependency on one node for nothing.
 
-A new NodePort is a decision, not a default. `fathom-eval-serve` is ClusterIP because
+**There are no NodePorts.** The lab's contract routes every tenant through one shared
+gateway, told apart by path prefix, and a NodePort needs the lab owner's approval. Only
+`fathom-front` is exposed, under `/fathom/`. Anything a browser loads must therefore use
+relative URLs — a root-absolute one leaves the prefix. Reaching another service from the
+workstation is a `kubectl port-forward`.
+
+`fathom-eval-serve` would stay ClusterIP in any case, because
 its API is unauthenticated and returns `results.answer` verbatim — including the planted
 canary when the `secret-bait` fixture catches a leak.
 
@@ -505,17 +512,30 @@ without a span and would otherwise cost eight spans every probe.
 the browser; the eval harness sends a fresh `/chat` per question. A feature needing
 server-side session state is a design change, not an implementation detail.
 
-### Release
+### Release and deploy
 
 The root `Makefile` cuts one version across all four components at once:
-`make release BUMP=patch`. A component joins by appending to `COMPONENTS` and `CHARTS`
-and adding an ordered `deploy-<name>` target.
+`make release BUMP=patch` — check, bump, commit and tag locally, build and push the
+images. A component joins by appending to `COMPONENTS` and `CHARTS`.
 
-**Order matters** — each service's readiness depends on the one before it: mcp, then
-agent, then front, then eval. `deploy-eval` is the one target that cannot gate on a
-rollout: a CronJob has no readiness, and its PVC stays `Pending` by design under
-`WaitForFirstConsumer`, so waiting on `Bound` would hang on a healthy install. It
-asserts the CronJob's image tag instead.
+**Nothing in the repository deploys.** The lab is deployed by Argo CD from `bifrost`:
+one `Application` per chart in `deploy/applications.yaml`, automated sync with prune and
+self-heal. A merged commit is the rollout, and the chart's `appVersion` is the image
+tag, so a release is the bump commit landing — after its images were pushed. No
+`helm install/upgrade`, no `--set`, no hand edits: Argo CD reverts them.
+[`deploy.md`](deploy.md) is the full procedure.
+
+**There is no deploy order.** Each service reports not-ready until the one it dials
+answers (front → agent → mcp), so the three converge however they are synced.
+
+**`eval` has no Application.** It needs a second namespace and cluster-scoped objects
+the lab owner has not been asked for. It is built and versioned, not deployed.
+
+A component joins the deployment by adding an `Application` to
+`deploy/applications.yaml` — which a human then re-applies — and must fit the lab's
+contract: everything in the `fathom` namespace, nothing cluster-scoped without
+approval, CPU and memory requests and a memory limit on every container, images public
+and pinned.
 
 ### Storage and data
 
@@ -550,11 +570,11 @@ In order:
 2. Implement the fourteen shared `make` targets before anything else. They are how
    everything else in the repo invokes you. `contract` is the one with a consumer
    outside your own directory -- see [Contracts](#contracts).
-3. Write `helm/`, including `NOTES.txt`. Set `namespace.create` correctly: `false` if you
-   live in `fathom`.
+3. Write `helm/`, including `NOTES.txt`. Set `namespace.create: false` if you live in
+   `fathom` — Argo CD creates that namespace.
 4. Wire telemetry at construction, and exclude your probes.
-5. Append to `COMPONENTS` and `CHARTS` in the root `Makefile`, and add an ordered
-   `deploy-<name>`.
+5. Append to `COMPONENTS` and `CHARTS` in the root `Makefile`, and add an `Application`
+   to `deploy/applications.yaml`.
 6. Write `<component>/README.md` with the sections every other one has: how it fits
    together, prerequisites, build and push, install, verify, the API if it has one,
    **a Helm value table**, telemetry, running outside the cluster, troubleshooting,

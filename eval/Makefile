@@ -20,16 +20,18 @@ SHELL    := /bin/bash
 .NOTPARALLEL:
 
 BINARY   := fathom-eval
-REGISTRY ?= registry.lab:5000
+REGISTRY ?= ghcr.io/salian14
 IMAGE    ?= $(REGISTRY)/$(BINARY)
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 CHART    := helm
 VENV     := .venv
 PY       := $(VENV)/bin/python
 
-# `make run-local` talks to the deployed agent over its NodePort and writes to a
-# scratch database, so a hand-run never touches the nightly results on the PVC.
-AGENT_URL  ?= http://192.168.56.10:30080
+# `make run-local` talks to the deployed agent and writes to a scratch database,
+# so a hand-run never touches the nightly results on the PVC. The agent has no
+# NodePort, so tunnel to it first:
+#   kubectl --context spellcore-k8s-lab -n fathom port-forward svc/fathom-agent 8081:8080
+AGENT_URL  ?= http://localhost:8081
 JUDGE_URL  ?= http://192.168.56.1:11435
 LOCAL_DB   ?= /tmp/fathom-eval.db
 FIXTURES   ?=
@@ -81,7 +83,7 @@ help:
 	@echo "  make clean          remove the venv and caches"
 	@echo "  make all            check, then build"
 	@echo
-	@echo "Knobs:  VERSION=x.y.z  REGISTRY=<host:port>  IMAGE=<ref>"
+	@echo "Knobs:  VERSION=x.y.z  REGISTRY=<host/owner>  IMAGE=<ref>"
 	@echo "        AGENT_URL=<url>  JUDGE_URL=<url>  LOCAL_DB=<path>"
 	@echo "        FIXTURES=a,b  ITERATIONS=$(ITERATIONS)  JOB=run|judge  SERVE_PORT=$(SERVE_PORT)"
 	@echo

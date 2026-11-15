@@ -17,10 +17,10 @@ is not checked at install time and is not part of the readiness probe -- the
 Kubernetes tools keep working if Prometheus is down.
 {{- else -}}
 The metrics tools (list_metrics, describe_metric, run_promql) are NOT registered:
-prometheus.url is empty. Set it to register them, e.g.
+prometheus.url is empty. Set it in values.yaml to register them, e.g.
 
-  helm upgrade fathom-mcp ./helm \
-    --set prometheus.url=http://prometheus-server.observability.svc.cluster.local:80
+  prometheus:
+    url: http://prometheus-server.observability.svc.cluster.local:80
 
 No RBAC change goes with that -- Prometheus is not the Kubernetes API.
 {{- end }}

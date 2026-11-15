@@ -6,9 +6,12 @@
 #
 #     make release BUMP=minor
 #
-# runs every component check, bumps all three components to the same next
-# semver, commits and tags that bump, builds and pushes every image at that tag,
-# and rolls every chart out with it.
+# runs every component check, bumps every component to the same next semver,
+# commits and tags that bump, and builds and pushes every image at that tag.
+#
+# It does not deploy, and nothing in this repository does. The lab is deployed
+# by Argo CD from the `bifrost` branch (deploy/applications.yaml, docs/deploy.md):
+# the release commit reaching `bifrost` through its PR is the rollout.
 #
 # The versions move in lockstep on purpose -- one Fathom version, not three.
 # The base is the highest version any chart currently declares, so the charts
@@ -18,27 +21,24 @@
 # from the charts, and a low outlier is invisible while a high one moves it.
 #
 # The image tag is not passed around out of band: every chart defaults
-# `image.tag` to `.Chart.AppVersion`, so bumping the chart is what re-points the
-# Deployment. `--set image.tag` is still passed at deploy time so a stale chart
-# checkout cannot quietly ship the previous image.
+# `image.tag` to `.Chart.AppVersion`, so the bump commit is what re-points the
+# Deployment once Argo CD sees it. That is also why the order below matters:
+# the images are pushed before the commit can be merged, so the tag a chart
+# names always exists by the time anything tries to pull it.
 #
 # The bump stages, commits and tags itself (NO_COMMIT=1 / NO_TAG=1 opt out), so
 # `push` builds from a committed tree -- which is what preflight's dirty-tree
 # check already claims to guarantee. Nothing here ever contacts a remote: the
-# commit and the tag stay local and go out through the normal PR flow.
-#
-# Deploy is ordered, not merely sequenced: fathom-agent does not roll until
-# fathom-mcp's new pods are actually serving, and fathom-front does not roll
-# until the agent's are.
+# commit and the tag stay local and go out through the normal PR flow. The
+# one thing that does leave the machine is the images, to $(REGISTRY).
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 .NOTPARALLEL:
 
-# Build/push/check order, not alphabetical: the mcp chart owns the fathom
-# Namespace and exposes the tools the agent dials on startup, and fathom-front
-# proxies to the agent. `deploy` does not loop over this -- see the deploy
-# targets, where the three are not symmetric.
+# Build/push/check order, not alphabetical: it follows the dependency chain --
+# mcp exposes the tools the agent dials on startup, and fathom-front proxies to
+# the agent -- so a failure surfaces in the component that caused it.
 COMPONENTS := mcp agent front eval
 CHARTS     := mcp/helm/Chart.yaml agent/helm/Chart.yaml front/helm/Chart.yaml eval/helm/Chart.yaml
 
@@ -57,22 +57,6 @@ ALLOW_DIRTY ?=
 SKIP_CHECK  ?=
 NO_COMMIT   ?=
 NO_TAG      ?=
-
-# The charts pin every resource to `namespace.name` (fathom) themselves, so the
-# release namespace only decides where Helm keeps its own release metadata.
-# Empty by default to match the READMEs, which install from the current context.
-HELM_NAMESPACE ?=
-HELM_NS_FLAG   := $(if $(HELM_NAMESPACE),--namespace $(HELM_NAMESPACE),)
-HELM_FLAGS     ?= --wait --timeout 5m
-
-# Where the workloads actually land. Deliberately not HELM_NAMESPACE: that one
-# only locates Helm's release metadata, while the pods the rollout gate waits on
-# are pinned to `namespace.name` by the charts themselves.
-FATHOM_NS       ?= fathom
-# The harness lives outside the fathom namespace on purpose: it is the only component
-# with write credentials, so it is kept away from the services it tests.
-EVAL_NS         ?= fathom-eval
-ROLLOUT_TIMEOUT ?= 5m
 
 CURRENT := $(shell grep -hE '^(version|appVersion):' $(CHARTS) \
              | sed -E 's/.*:[[:space:]]*"?([0-9]+\.[0-9]+\.[0-9]+)"?.*/\1/' \
@@ -94,7 +78,7 @@ TAG        ?= v$(NEXT)
 help:
 	@echo "Fathom release targets"
 	@echo
-	@echo "  make release BUMP=major|minor|patch   check, bump, build, push, deploy -- all components"
+	@echo "  make release BUMP=major|minor|patch   check, bump, build, push -- all components"
 	@echo "  make release-major | release-minor | release-patch"
 	@echo "  make release VERSION=1.4.2            pin an exact version instead of bumping"
 	@echo
@@ -105,13 +89,13 @@ help:
 	@echo "  make hooks                            install the checked-in git hooks (.githooks)"
 	@echo "  make bump BUMP=patch                  rewrite the version files, then commit and tag them"
 	@echo "  make push  BUMP=patch                 build and push every image only"
-	@echo "  make deploy                           helm upgrade every chart -- each waits on the last"
 	@echo "  make render                           render every chart at the next version"
 	@echo "  make clean                            clean every component"
 	@echo
 	@echo "Knobs:  ALLOW_DIRTY=1  SKIP_CHECK=1  NO_COMMIT=1  NO_TAG=1  COMPONENT=<name>"
-	@echo "        HELM_NAMESPACE=<ns>  HELM_FLAGS='...'  FATHOM_NS=<ns>  EVAL_NS=<ns>"
-	@echo "        ROLLOUT_TIMEOUT=5m"
+	@echo
+	@echo "Deploying is not a make target: Argo CD syncs the lab from bifrost."
+	@echo "See docs/deploy.md."
 	@echo
 	@echo "Current version: $(CURRENT)"
 
@@ -122,7 +106,7 @@ version:
 
 # Everything that can fail cheaply fails here, before an image is built or a
 # chart is rewritten -- a release that dies halfway leaves the charts bumped and
-# the cluster on the old tag.
+# no image behind the tag they name.
 .PHONY: preflight
 preflight:
 	@if [ -z "$(NEXT)" ]; then \
@@ -132,7 +116,7 @@ preflight:
 	@if [ "$(NEXT)" = "$(CURRENT)" ] || \
 	    [ "$$(printf '%s\n%s\n' '$(CURRENT)' '$(NEXT)' | sort -V | tail -1)" != "$(NEXT)" ]; then \
 	  echo "error: $(NEXT) does not advance on the current version $(CURRENT)"; exit 1; fi
-	@for t in git docker helm kubectl; do \
+	@for t in git docker helm; do \
 	  command -v $$t >/dev/null 2>&1 || { echo "error: $$t not on PATH"; exit 1; }; \
 	done
 	@if [ -z "$(ALLOW_DIRTY)" ] && [ -n "$$(git status --porcelain)" ]; then \
@@ -309,82 +293,6 @@ push: guard-next
 	  $(MAKE) --no-print-directory -C $$c push VERSION=$(NEXT) || exit 1; \
 	done
 
-# Not a loop over $(COMPONENTS): the three are not symmetric. Each dials the one
-# before it on startup -- the agent dials fathom-mcp, fathom-front's readiness
-# is the agent's -- so each must not roll until the previous one's new pods are
-# serving. A pod that comes up against a half-rolled dependency fails its
-# readiness probe and restarts. HELM_FLAGS' --wait is not enough to lean on
-# here: it is a knob, and overriding it would silently remove the gate.
-.PHONY: deploy
-deploy: deploy-mcp deploy-agent deploy-front deploy-eval
-
-.PHONY: deploy-mcp
-deploy-mcp: guard-next
-	@echo "==> deploy: fathom-mcp at $(NEXT)"
-	@helm upgrade --install fathom-mcp ./mcp/helm $(HELM_NS_FLAG) $(HELM_FLAGS) \
-	  --set image.tag=$(NEXT)
-	@echo "==> waiting for fathom-mcp pods at $(NEXT)"
-	@kubectl -n $(FATHOM_NS) rollout status deploy/fathom-mcp --timeout=$(ROLLOUT_TIMEOUT)
-	@img="$$(kubectl -n $(FATHOM_NS) get deploy fathom-mcp \
-	          -o jsonpath='{.spec.template.spec.containers[0].image}')"; \
-	 case "$$img" in *:$(NEXT)) ;; \
-	   *) echo "error: fathom-mcp is running $$img, expected :$(NEXT)"; exit 1;; esac
-	@echo "==> fathom-mcp ready at $(NEXT)"
-
-.PHONY: deploy-agent
-deploy-agent: guard-next
-	@echo "==> deploy: fathom-agent at $(NEXT)"
-	@helm upgrade --install fathom-agent ./agent/helm $(HELM_NS_FLAG) $(HELM_FLAGS) \
-	  --set image.tag=$(NEXT)
-	@kubectl -n $(FATHOM_NS) rollout status deploy/fathom-agent --timeout=$(ROLLOUT_TIMEOUT)
-	@echo "==> fathom-agent ready at $(NEXT)"
-
-# Last, and gated on the agent above for the same reason the agent is gated on
-# mcp: fathom-front's readiness probe *is* the agent's readiness, so rolling it
-# against a half-rolled agent produces a pod that will not go ready.
-.PHONY: deploy-front
-deploy-front: guard-next
-	@echo "==> deploy: fathom-front at $(NEXT)"
-	@helm upgrade --install fathom-front ./front/helm $(HELM_NS_FLAG) $(HELM_FLAGS) \
-	  --set image.tag=$(NEXT)
-	@kubectl -n $(FATHOM_NS) rollout status deploy/fathom-front --timeout=$(ROLLOUT_TIMEOUT)
-	@echo "==> fathom-front ready at $(NEXT)"
-
-# Last. Gates in two parts, because this chart holds two kinds of workload.
-#
-# The CronJobs cannot be waited on: a CronJob has no rollout, and between scheduled
-# runs there is no pod to become ready. Nor can we wait for the PVC to be Bound on
-# their account -- the cluster's default StorageClass is local-path with
-# WaitForFirstConsumer, so an unmounted claim stays Pending by design. What can be
-# asserted is that the CronJob exists and its jobTemplate carries the tag we pushed.
-#
-# The read service is a Deployment and does have a rollout, so it is waited on --
-# guarded by a `get`, because serve.enabled=false is a supported install and its
-# absence is not a failure. It is also now the PVC's first consumer on a fresh
-# install, which means the claim binds at deploy time rather than at the first run.
-# That is a change in behaviour from when this chart was CronJobs only, and it is
-# fine: binding becomes deterministic and early, and the Deployment carries the same
-# scheduling constraints as the CronJobs so it cannot strand the volume on a node
-# they cannot reach.
-#
-# Note the chart ships both CronJobs suspended. `make deploy` should not start a
-# multi-hour evaluation against a cluster it finished rolling seconds ago; unsuspending
-# is a deliberate act, and NOTES.txt says how.
-.PHONY: deploy-eval
-deploy-eval: guard-next
-	@echo "==> deploy: fathom-eval at $(NEXT)"
-	@helm upgrade --install fathom-eval ./eval/helm $(HELM_NS_FLAG) $(HELM_FLAGS) \
-	  --set image.tag=$(NEXT)
-	@img="$$(kubectl -n $(EVAL_NS) get cronjob fathom-eval \
-	          -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}')"; \
-	 case "$$img" in *:$(NEXT)) ;; \
-	   *) echo "error: fathom-eval CronJob is set to run $$img, expected :$(NEXT)"; exit 1;; esac
-	@echo "==> fathom-eval scheduled at $(NEXT) (suspended: $$(kubectl -n $(EVAL_NS) get cronjob fathom-eval -o jsonpath='{.spec.suspend}'))"
-	@if kubectl -n $(EVAL_NS) get deploy fathom-eval-serve >/dev/null 2>&1; then \
-	  echo "==> waiting for fathom-eval-serve"; \
-	  kubectl -n $(EVAL_NS) rollout status deploy/fathom-eval-serve --timeout=$(ROLLOUT_TIMEOUT); \
-	fi
-
 # Preview only: this renders the *current* charts with the next image tag, so the
 # chart labels still read the old version until `make bump` has run.
 .PHONY: render
@@ -394,16 +302,16 @@ render: guard-next
 	done
 
 .PHONY: release
-release: preflight check bump push deploy
+release: preflight check bump push
 	@echo
 	@echo "==> released $(NEXT)"
 	@echo "    images:  fathom-mcp:$(NEXT), fathom-agent:$(NEXT), fathom-front:$(NEXT), fathom-eval:$(NEXT)"
 	@echo "    commit:  $(COMMIT_MSG)"
 	@echo "    tag:     $(TAG)"
 	@echo "    neither is pushed -- take the branch through the usual PR flow."
-	@echo "    if push or deploy failed above, this version is committed but never"
-	@echo "    shipped: git tag -d $(TAG) && git reset --hard HEAD~1 undoes it."
-	@kubectl -n $(FATHOM_NS) get deploy 2>/dev/null || true
+	@echo "    Argo CD rolls the lab to $(NEXT) within a minute of the merge to bifrost."
+	@echo "    if push failed above, this version is committed but has no images:"
+	@echo "    git tag -d $(TAG) && git reset --hard HEAD~1 undoes it."
 
 .PHONY: release-major release-minor release-patch
 release-major:
@@ -413,8 +321,8 @@ release-minor:
 release-patch:
 	@$(MAKE) --no-print-directory release BUMP=patch
 
-# The individual steps are useful on their own (re-push a failed image, deploy a
-# chart that is already bumped), but none of them can run without a version.
+# The individual steps are useful on their own (re-push a failed image, render
+# a chart at the next tag), but none of them can run without a version.
 .PHONY: guard-next
 guard-next:
 	@if [ -z "$(NEXT)" ]; then \

@@ -38,11 +38,12 @@ on your workstation. If /readyz reports Ollama unreachable, check that first:
   kubectl run dnstest --rm -it --restart=Never --image=busybox \
     -- nslookup {{ .Values.ollama.service.externalName }}
 
-If it does not resolve, skip the Service and dial the host directly:
+If it does not resolve, skip the Service and dial the host directly, in values.yaml:
 
-  helm upgrade {{ .Release.Name }} ./helm \
-    --set ollama.service.create=false \
-    --set ollama.url=http://<host-ip-on-the-node-network>:11434
+  ollama:
+    url: http://<host-ip-on-the-node-network>:11434
+    service:
+      create: false
 {{- else -}}
 The Ollama ExternalName Service is disabled, so {{ .Values.ollama.url }} must be
 reachable from a pod on its own.

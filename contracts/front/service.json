@@ -15,11 +15,11 @@
     {
       "name": "fathom-front",
       "namespace": "fathom",
-      "node_port": 30081,
+      "node_port": null,
       "port": 8080,
       "protocol": "TCP",
       "target_port": "http",
-      "type": "NodePort"
+      "type": "ClusterIP"
     }
   ],
   "version": "0.5.4",
@@ -29,7 +29,7 @@
         8080
       ],
       "images": [
-        "registry.lab:5000/fathom-front:0.5.4"
+        "ghcr.io/salian14/fathom-front:0.5.4"
       ],
       "kind": "Deployment",
       "name": "fathom-front"

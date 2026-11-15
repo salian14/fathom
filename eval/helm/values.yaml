@@ -7,7 +7,10 @@ namespace:
   create: true
 
 image:
-  repository: registry.lab:5000/fathom-eval
+  # Public, because the lab contract (5.3) has tenants pull from outside the lab:
+  # an image that lives there survives a lab rebuild. The tag stays empty so the
+  # chart's appVersion pins it -- a version bump committed to git is the deploy.
+  repository: ghcr.io/salian14/fathom-eval
   tag: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
@@ -119,7 +122,7 @@ persistence:
   keep: true
 
 cronjob:
-  # Shipped suspended on purpose. `make deploy-eval` runs at the end of a release, and
+  # Shipped suspended on purpose. A sync or install should not start an evaluation, and
   # an unsuspended CronJob would kick off a multi-hour evaluation against a cluster
   # that was rolled seconds ago. Unsuspend deliberately, once.
   suspend: true
